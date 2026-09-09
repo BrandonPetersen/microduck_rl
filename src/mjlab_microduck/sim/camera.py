@@ -206,3 +206,65 @@ class FrameHandler(socketserver.BaseRequestHandler):
 class FrameServer(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
+
+
+# ── the bench stream ──────────────────────────────────────────────────────────────────────────
+#
+# A SECOND port, deliberately. Port 7901's format is `<I length> + bytes` and `mediad` parses
+# exactly that (`mediad/src/pipeline.rs:969-999`), so it cannot carry a timestamp without breaking
+# the daemon. The bench stream is for a ground-truth benchmark that bypasses `mediad` and WebRTC
+# altogether, so it can afford a real header -- and it carries the ground-truth depth too.
+BENCH_MAGIC = b"DBF1"
+# magic, seq u32, sim_time f64, mono_ns u64, width u16, height u16, rgb_len u32, depth_len u32
+BENCH_HEADER = "<4sIdQHHII"
+
+
+def pack_bench_frame(
+    seq: int, sim_time: float, mono_ns: int, width: int, height: int,
+    uyvy: bytes, depth: np.ndarray,
+) -> bytes:
+    """One bench frame: header, then UYVY, then float32 depth in metres."""
+    payload = np.ascontiguousarray(depth, dtype=np.float32).tobytes()
+    head = struct.pack(
+        BENCH_HEADER, BENCH_MAGIC, seq, float(sim_time), int(mono_ns),
+        width, height, len(uyvy), len(payload),
+    )
+    return head + uyvy + payload
+
+
+class BenchHandler(socketserver.BaseRequestHandler):
+    """Header-prefixed RGB+depth frames, one per render, until the reader goes away.
+
+    Blocks on `Camera.wait_frame` rather than sending on its own timer. That is the difference
+    from `FrameHandler`: the render loop runs at 16.67 Hz (passes_per_eye=3 at a 20 ms period)
+    and FrameHandler's timer at 15 Hz, so the two beat and roughly 1.7 frames a second are
+    duplicated or dropped -- invisibly, because nothing on that wire has a sequence number.
+    """
+
+    def handle(self) -> None:
+        camera: Camera = self.server.camera
+        self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        print(f"== bench: a reader connected from {self.client_address}", flush=True)
+        last = -1
+        try:
+            while True:
+                got = camera.wait_frame(after_seq=last, timeout=5.0)
+                if got is None:
+                    continue  # nothing rendered in 5 s; the sim may be paused
+                seq, sim_time, mono_ns, uyvy, depth = got
+                if uyvy is None or depth is None:
+                    continue
+                last = seq
+                self.request.sendall(
+                    pack_bench_frame(
+                        seq, sim_time, mono_ns, camera.width, camera.height, uyvy, depth
+                    )
+                )
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        print("== bench: the reader went away", flush=True)
+
+
+class BenchServer(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True

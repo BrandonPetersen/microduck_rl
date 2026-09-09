@@ -53,7 +53,7 @@ import mujoco
 import numpy as np
 
 from mjlab_microduck.sim.camera import FPS as CAMERA_FPS
-from mjlab_microduck.sim.camera import Camera, FrameHandler, FrameServer
+from mjlab_microduck.sim.camera import BenchHandler, BenchServer, Camera, FrameHandler, FrameServer
 from mjlab_microduck.sim.tof import COLS, ROWS, Tof
 
 PROTOCOL = 1
@@ -518,6 +518,14 @@ def main() -> None:
         "nothing. Each becomes a frame port at --frame-port + its index",
     )
     parser.add_argument("--frame-port", type=int, default=7901, help="the first camera's port")
+    parser.add_argument(
+        "--bench-port",
+        type=int,
+        default=7951,
+        help="the first camera's BENCH port: header-prefixed RGB + ground-truth depth, one frame "
+        "per render, stamped with sim_time. Separate from --frame-port because that one's format "
+        "belongs to mediad; this one is for a ground-truth benchmark that bypasses mediad",
+    )
     parser.add_argument("--camera-fps", type=int, default=CAMERA_FPS)
     parser.add_argument(
         "--limp",
@@ -571,10 +579,22 @@ def main() -> None:
             frames.fps = args.camera_fps
             threading.Thread(target=frames.serve_forever, daemon=True).start()
             servers.append(frames)
+            # The bench port, beside the mediad one and never in place of it: `mediad` parses
+            # `<I length> + bytes` off --frame-port and would break on a header, so a benchmark
+            # that needs a timestamp and the ground-truth depth gets its own socket. Same camera,
+            # so the render is paid for once.
+            bench = BenchServer((args.host, args.bench_port + index), BenchHandler)
+            bench.camera = body.camera
+            bench.fps = args.camera_fps
+            threading.Thread(target=bench.serve_forever, daemon=True).start()
+            servers.append(bench)
 
     print(f"== {args.scene.name}: {args.ducks} duck(s), starting at {args.keyframe}", flush=True)
     for index in range(args.ducks):
-        eye = f" · camera on {args.host}:{args.frame_port + index}" if index in wanted else ""
+        eye = (
+            f" · camera on {args.host}:{args.frame_port + index}"
+            f" · bench on {args.host}:{args.bench_port + index}"
+        ) if index in wanted else ""
         print(f"==   duck {index}: robotd --sim {args.host}:{args.port + index}{eye}", flush=True)
 
     run(world, headless=args.headless)
