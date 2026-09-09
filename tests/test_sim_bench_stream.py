@@ -9,6 +9,7 @@ The bench stream fixes both: it blocks for a NEW frame, and it carries (seq, sim
 import socket
 import struct
 import threading
+import time
 
 import mujoco
 import numpy as np
@@ -69,6 +70,44 @@ def _read_exactly(sock, n):
             raise ConnectionError("stream ended early")
         buf += chunk
     return buf
+
+
+def test_a_reader_gets_the_next_frame_not_a_pre_connection_backlog():
+    """Frames rendered before anyone connected are stale, and the bench recorder pairs each frame
+    with a LIVE state/ToF/truth sample -- so handing over a backlog silently mispairs the opening
+    frames. MEASURED on a real 40 s capture before this: the first 8 frames' sidecar rows led their
+    frame by 480, 420, 380, 320, 280, 220, 160, 100, 40 ms (BENCH_QUEUE deep) instead of the
+    steady-state 20 ms, which is one physics step."""
+    cam, world = _cam()
+    for i in range(5):  # rendered with nobody listening
+        world.data.time = 0.1 * i
+        cam.render(world)
+    server = BenchServer(("127.0.0.1", 0), BenchHandler)
+    server.camera = cam
+    server.fps = 15
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        sock = socket.create_connection(server.server_address, timeout=5)
+        sock.settimeout(5)
+        # The handler latches `camera.seq` as its first act, on its own thread. Give that thread
+        # time to get there before rendering anything fresh -- rendering has to stay on THIS
+        # thread, because a mujoco.Renderer's GL context belongs to the thread that made it.
+        time.sleep(0.5)
+        world.data.time = 9.0
+        cam.render(world)
+        size = struct.calcsize(BENCH_HEADER)
+        _m, seq, sim_time, _mono, _w, _h, rgb_len, depth_len = struct.unpack(
+            BENCH_HEADER, _read_exactly(sock, size)
+        )
+        _read_exactly(sock, rgb_len + depth_len)
+        assert (seq, sim_time) == (5, pytest.approx(9.0)), (
+            f"got seq {seq} at sim_time {sim_time}, wanted the frame rendered after connect: "
+            "the reader was handed the pre-connection backlog"
+        )
+        sock.close()
+    finally:
+        server.shutdown()
+        server.server_close()
 
 
 def test_every_render_is_delivered_exactly_once_in_order():

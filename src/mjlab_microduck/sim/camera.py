@@ -245,7 +245,17 @@ class BenchHandler(socketserver.BaseRequestHandler):
         camera: Camera = self.server.camera
         self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         print(f"== bench: a reader connected from {self.client_address}", flush=True)
-        last = -1
+        # Start from whatever has already been rendered, so a session opens on the NEXT frame
+        # rather than on a backlog rendered before anyone was listening. MEASURED without this:
+        # the first 8 frames of a 40 s capture (BENCH_QUEUE deep) came out of the queue stale
+        # while the recorder's `read`/`tof`/`truth` round trips returned the live world, so the
+        # sidecar rows led their frame by 480, 420, 380, 320, 280, 220, 160, 100, 40 ms before
+        # settling at the steady-state 20 ms (one physics step). A consumer pairing by row index
+        # got a pose up to 480 ms wrong for those frames. Discarding a pre-connection backlog
+        # costs nothing: nobody asked for it, and `seq` still starts wherever the sim is, so the
+        # gaplessness check is on what was delivered and not on what the sim ever rendered.
+        with camera.lock:
+            last = camera.seq
         try:
             while True:
                 got = camera.wait_frame(after_seq=last, timeout=5.0)
