@@ -2,7 +2,14 @@
     <include file="robot_allcollisions.xml" />
     <include file="vslam_room.xml" />
 
+    <!-- extent is pinned so znear/zfar mean fixed METRES. Auto-derived, this 11.2 m room gave
+         extent 22.378 -> znear 0.2238 m, which clipped the nearest floor in frame, the duck's own
+         beak and any wall it walked up to, in RGB as well as depth. Side effect: the viewer's
+         default camera distance is derived from extent too, so it starts closer. -->
+    <statistic extent="1.0"/>
+
     <visual>
+        <map znear="0.02" zfar="20"/>
         <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0" />
         <rgba haze="0.15 0.25 0.35 1" />
         <global azimuth="160" elevation="-20" />
