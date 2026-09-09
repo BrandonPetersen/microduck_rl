@@ -7,11 +7,13 @@
          level and pitched down) the old near plane clipped zero pixels -- the nearest geometry in
          view is 0.3374 m / 0.3324 m, the duck's own body, not the floor (camera sits 0.248 m up
          with a 45 deg vertical FOV, so the nearest floor ray lands ~0.6 m out) -- and depth read
-         back under the old and the pinned frustum agrees to 1.7e-5 m. What pinning actually buys:
-         the old zfar spent the depth buffer on ~700 m of empty space past the flat, so distinct
-         depth values in the 1-2 m band went from 129 to 219 (roughly 7.8 mm to 4.6 mm steps); and
-         extent can no longer move the planes silently on a scene-geometry edit. Side effect: the
-         viewer's default camera distance is derived from extent too, so it starts closer. -->
+         back under the old and the pinned frustum agrees exactly (max difference 0.000000 m).
+         What pinning actually fixes: extent can no longer move znear/zfar silently on a
+         scene-geometry edit, which was the real fragility. Depth-buffer precision also improves,
+         but the gain is scene-dependent, not a fixed win -- here, with only ~5141 pixels in the
+         1-2 m band, distinct depth values went from 72 to 78 (roughly 13.9 mm to 12.8 mm steps),
+         a much smaller gain than scene_vslam.xml's open room sees from the same fix. Side effect:
+         the viewer's default camera distance is derived from extent too, so it starts closer. -->
     <statistic extent="1.0"/>
 
     <visual>
