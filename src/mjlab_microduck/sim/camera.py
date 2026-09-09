@@ -19,6 +19,8 @@ import socket
 import socketserver
 import struct
 import threading
+import time
+from collections import deque
 
 import mujoco
 import numpy as np
@@ -31,6 +33,17 @@ HEIGHT = 360
 # The sensor's rate is 30, but a rendered frame costs 12 ms and a duck that is being watched is
 # usually being watched rather than raced. 15 halves the cost for something nobody can see.
 FPS = 15
+
+# The far plane the SLAM scenes pin (see scene_vslam.xml). MuJoCo returns exactly this value for
+# pixels where no geometry was hit, so a consumer must mask them rather than feed them to SLAM.
+ZFAR_M = 20.0
+
+# How many rendered frames wait for the bench reader. A queue rather than a single "latest" slot,
+# because a ground-truth benchmark must not lose frames to a reader that falls a little behind.
+# Bounded, because an unbounded one turns a slow reader into an out-of-memory crash instead; past
+# this depth a frame IS dropped, and the drop shows up as a jump in `seq`, so it can never be
+# silent. Eight 640x360 frames of UYVY plus float32 depth is about 11 MB.
+BENCH_QUEUE = 8
 
 # BT.601, the same coefficients `duck_detect`'s one-pass sampler uses on the robot.
 _Y = np.array([0.299, 0.587, 0.114])
@@ -81,30 +94,85 @@ class Camera:
         # quarter turn off, `mediad --rotate 90` announces it, and every consumer already undoes
         # it. `tests/test_sim_camera_frame.py` pins the relationship.
         self.renderer = mujoco.Renderer(model, height=height, width=width)
+        # Depth needs its OWN renderer: `render()` sets mjRND_SEGMENT|mjRND_IDCOLOR for a depth
+        # pass, so one instance cannot serve both. Both are driven from a single `update_scene`
+        # below, which is what makes the two images the same instant and pixel-aligned.
+        self.depth_renderer = mujoco.Renderer(model, height=height, width=width)
+        self.depth_renderer.enable_depth_rendering()
         self.width = width
         self.height = height
         self.latest: bytes | None = None
+        self.latest_depth: np.ndarray | None = None
+        self.sim_time = 0.0
+        self.mono_ns = 0
+        self.seq = -1
         self.lock = threading.Lock()
+        # Frames waiting for the bench reader, oldest first. Waiters block on this instead of
+        # polling on their own timer, so every rendered frame is delivered exactly once and in
+        # order (see FrameHandler's beat, fixed in BenchHandler).
+        self._pending: deque = deque(maxlen=BENCH_QUEUE)
+        self.cond = threading.Condition(self.lock)
 
     def render(self, world) -> None:
-        """Render one frame, reading `MjData` only while holding the world's lock.
+        """Render one RGB frame and one ground-truth depth frame, from one scene copy.
 
         **`update_scene` reads the whole of `MjData`, and it runs on the step loop's thread while
         sensor reads run on socket threads.** Unlocked, a ToF read caught a site orientation
         mid-write and got a zero-length ray direction — which MuJoCo answers with
         `mj_ray: vector length is too small` and an abort, taking the simulator down with it. The
-        lock is held for the scene copy, which is a millisecond, and released for the render, which
-        is twelve and touches no shared state.
+        lock is held for the two scene copies and the clock read, which is a couple of
+        milliseconds, and released for the renders, which are twelve each and touch no shared
+        state.
+
+        `sim_time` is read INSIDE the lock, with the scene copy. Read outside it, the timestamp
+        would belong to a later world than the pixels — which is the whole failure this bench
+        exists to remove.
         """
         with world.lock:
+            sim_time = float(world.data.time)
             self.renderer.update_scene(world.data, camera=self.camera)
+            self.depth_renderer.update_scene(world.data, camera=self.camera)
         packed = to_uyvy(self.renderer.render())
-        with self.lock:
+        # float32 metres, depth along the optical axis; exactly ZFAR_M where nothing was hit.
+        depth = np.ascontiguousarray(self.depth_renderer.render(), dtype=np.float32)
+        mono_ns = time.monotonic_ns()
+        with self.cond:
+            self.seq += 1
             self.latest = packed
+            self.latest_depth = depth
+            self.sim_time = sim_time
+            self.mono_ns = mono_ns
+            self._pending.append((self.seq, sim_time, mono_ns, packed, depth))
+            self.cond.notify_all()
 
     def frame(self) -> bytes | None:
+        """The UYVY frame alone — what `mediad` reads off port 7901. Unchanged on purpose."""
         with self.lock:
             return self.latest
+
+    def wait_frame(self, after_seq: int, timeout: float):
+        """Block until a frame newer than `after_seq` is queued; return the OLDEST such, or None.
+
+        Returns `(seq, sim_time, mono_ns, uyvy, depth_m)`. Blocking on a bounded QUEUE rather than
+        polling a single "latest" slot is what makes the bench stream gapless. Port 7901 has the
+        opposite arrangement and both of its failure modes: the render loop runs at 16.67 Hz
+        (`passes_per_eye = round((1/15)/0.02) = 3`) while `FrameHandler` re-sends `latest` on its
+        own 15 Hz timer, so roughly 1.7 frames a second are duplicated or dropped — invisibly,
+        because nothing on that wire carries a sequence number.
+
+        A reader more than `BENCH_QUEUE` frames behind does still lose frames, and that is the
+        point of returning `seq`: the loss appears as a gap the consumer can detect rather than as
+        silently wrong data.
+        """
+        with self.cond:
+            if not self.cond.wait_for(
+                lambda: bool(self._pending) and self._pending[-1][0] > after_seq, timeout=timeout
+            ):
+                return None
+            # Discard anything the caller has already seen, then hand over the oldest it has not.
+            while self._pending and self._pending[0][0] <= after_seq:
+                self._pending.popleft()
+            return self._pending.popleft() if self._pending else None
 
 
 class FrameHandler(socketserver.BaseRequestHandler):
