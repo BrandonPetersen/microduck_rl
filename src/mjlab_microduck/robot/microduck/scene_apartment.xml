@@ -2,8 +2,8 @@
     <include file="robot_allcollisions.xml" />
     <include file="apartment.xml" />
 
-    <!-- extent is pinned so znear/zfar mean fixed METRES. Auto-derived, this 11.2 m room gave
-         extent 22.378 -> znear 0.2238 m, which clipped the nearest floor in frame, the duck's own
+    <!-- extent is pinned so znear/zfar mean fixed METRES. Auto-derived, this ~7x6 m flat gave
+         extent 14.211 -> znear 0.1421 m, which clipped the nearest floor in frame, the duck's own
          beak and any wall it walked up to, in RGB as well as depth. Side effect: the viewer's
          default camera distance is derived from extent too, so it starts closer. -->
     <statistic extent="1.0"/>

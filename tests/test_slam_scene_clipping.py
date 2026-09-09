@@ -30,6 +30,23 @@ def test_slam_scene_near_far_planes_are_metric_and_usable(scene):
 
 
 @pytest.mark.parametrize("scene", ["scene_vslam.xml", "scene_apartment.xml"])
+def test_slam_scene_near_far_planes_are_metric_exact_contract(scene):
+    """Metric values are exactly pinned for downstream consumers.
+
+    Task 3's depth test defines ZFAR_M = 20.0 and depends on zfar being exactly that value:
+    MuJoCo returns exactly zfar for pixels where no geometry was hit. A downstream mask
+    triggers on this exact value, so any deviation silently breaks the contract.
+    Similarly, znear must be exactly 0.02 m to avoid clipping the duck's own view.
+    """
+    model = mujoco.MjModel.from_xml_path(str(SCENES / scene))
+    extent = model.stat.extent
+    near_m = model.vis.map.znear * extent
+    far_m = model.vis.map.zfar * extent
+    assert near_m == pytest.approx(0.02), f"{scene}: znear must be exactly 0.02 m for depth contract"
+    assert far_m == pytest.approx(20.0), f"{scene}: zfar must be exactly 20.0 m for ZFAR_M constant"
+
+
+@pytest.mark.parametrize("scene", ["scene_vslam.xml", "scene_apartment.xml"])
 def test_slam_scene_extent_is_pinned_not_derived(scene):
     """Pinned, so a geometry edit cannot silently move the planes again."""
     model = mujoco.MjModel.from_xml_path(str(SCENES / scene))
