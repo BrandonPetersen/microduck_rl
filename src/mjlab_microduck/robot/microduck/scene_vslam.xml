@@ -16,8 +16,8 @@
          artefact -- the earlier "distinct depth values in the 1-2 m band went 129 -> 219, ~7.8 mm
          to ~4.6 mm steps" figure does not survive re-measurement. The delivered depth under the
          pinned frustum has no plateau at all: 18756 pixels in that band take 18756 distinct
-         values, with adjacent spacings of 0.0156 / 0.0447 / 0.227 mm. That is consistent with the
-         1.7e-5 m old-vs-pinned agreement above and with a 19 um median residual against analytic
+         values. That is consistent with the 1.7e-5 m old-vs-pinned agreement above and with a
+         19 um median residual against analytic
          room geometry (docs/validation/00-bench.md). The reasoning behind the claim was wrong too:
          for a 1/z buffer, precision is dominated by znear, not zfar, so lowering znear
          0.2238 -> 0.02 would if anything DEGRADE mid-range precision. Depth precision is Rung 3's

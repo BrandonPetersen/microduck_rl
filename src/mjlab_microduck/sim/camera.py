@@ -109,7 +109,11 @@ class Camera:
         self.lock = threading.Lock()
         # Frames waiting for the bench reader, oldest first. Waiters block on this instead of
         # polling on their own timer, so every rendered frame is delivered exactly once and in
-        # order (see FrameHandler's beat, fixed in BenchHandler).
+        # order (see FrameHandler's beat, fixed in BenchHandler). That guarantee is about the
+        # STREAM, not about each reader: BenchServer is an unlimited ThreadingTCPServer and
+        # wait_frame pops, so a second concurrent reader silently steals frames from the first --
+        # both then see it as a seq gap, which is what makes a second reader visible instead of a
+        # silent frame theft. Single-consumer by design.
         self._pending: deque = deque(maxlen=BENCH_QUEUE)
         self.cond = threading.Condition(self.lock)
 
@@ -184,8 +188,6 @@ class FrameHandler(socketserver.BaseRequestHandler):
         self.request.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         print(f"== camera: a reader connected from {self.client_address}", flush=True)
         period = 1.0 / max(1, fps)
-        import time
-
         next_frame = time.perf_counter()
         try:
             while True:
@@ -268,8 +270,6 @@ class BenchHandler(socketserver.BaseRequestHandler):
                 if got is None:
                     continue  # nothing rendered in 5 s; the sim may be paused
                 seq, sim_time, mono_ns, uyvy, depth = got
-                if uyvy is None or depth is None:
-                    continue
                 last = seq
                 self.request.sendall(
                     pack_bench_frame(

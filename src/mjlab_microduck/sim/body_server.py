@@ -347,7 +347,7 @@ class Body:
         **Not part of the protocol** -- like `trunk` and `sim_time` on `read`, serde drops it on
         the daemon side. It exists because deriving the camera pose from `robot.state.frames`
         goes through the robot's own FK, which reads a different MJCF asset: its camera sits
-        3.75 mm from the one the sim renders through, and its frame is rolled 90 deg from the
+        3.76 mm from the one the sim renders through, and its frame is rolled 90 deg from the
         rendered one. For scoring a SLAM trajectory, both of those are error we introduced
         ourselves.
 
@@ -627,7 +627,6 @@ def main() -> None:
             # so the render is paid for once.
             bench = BenchServer((args.host, args.bench_port + index), BenchHandler)
             bench.camera = body.camera
-            bench.fps = args.camera_fps
             threading.Thread(target=bench.serve_forever, daemon=True).start()
             servers.append(bench)
 

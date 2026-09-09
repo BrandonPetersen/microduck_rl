@@ -1,7 +1,7 @@
 """The truth op: MuJoCo's own camera pose, not the robot's FK guess.
 
 `{"op":"read"}` gives the TRUNK pose, so a consumer wanting the camera has to go through the
-robot's forward kinematics -- which uses a different MJCF asset whose camera sits 3.75 mm away
+robot's forward kinematics -- which uses a different MJCF asset whose camera sits 3.76 mm away
 from the one the sim renders from, and which publishes a frame rolled 90 deg from the rendered one.
 Serving cam_xpos/cam_xmat sidesteps all of it.
 """

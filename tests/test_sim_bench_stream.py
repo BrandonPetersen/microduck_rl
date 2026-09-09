@@ -84,7 +84,6 @@ def test_a_reader_gets_the_next_frame_not_a_pre_connection_backlog():
         cam.render(world)
     server = BenchServer(("127.0.0.1", 0), BenchHandler)
     server.camera = cam
-    server.fps = 15
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         sock = socket.create_connection(server.server_address, timeout=5)
@@ -114,7 +113,6 @@ def test_every_render_is_delivered_exactly_once_in_order():
     cam, world = _cam()
     server = BenchServer(("127.0.0.1", 0), BenchHandler)
     server.camera = cam
-    server.fps = 15
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
         sock = socket.create_connection(server.server_address, timeout=5)

@@ -13,7 +13,6 @@ import time
 from pathlib import Path
 
 import mujoco
-import numpy as np
 
 from mjlab_microduck.sim.camera import Camera
 

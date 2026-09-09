@@ -16,7 +16,6 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
-import pytest
 
 SCENES = Path(__file__).parent.parent / "src" / "mjlab_microduck" / "robot" / "microduck"
 

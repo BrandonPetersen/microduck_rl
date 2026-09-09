@@ -1,9 +1,9 @@
-"""The SLAM scenes must not clip what the duck's camera can actually see.
+"""The SLAM scenes must have metric, pinned near/far planes.
 
 znear/zfar in MJCF are FRACTIONS of model.stat.extent, which MuJoCo auto-derives from the scene
-bounding box. A big room therefore pushes the near plane out: scene_vslam.xml measured 0.2238 m,
-which clips the nearest floor in frame and any wall the duck walks up to -- in RGB as well as
-depth. These scenes pin extent so the fractions mean fixed metres.
+bounding box, so any scene-geometry edit could silently change the near/far planes' metre values.
+These scenes pin extent to 1.0 so the fractions mean fixed metres regardless of scene content:
+ZFAR_M = 20.0 and the checker's background test both depend on the exact values holding.
 """
 
 from pathlib import Path
@@ -13,8 +13,9 @@ import pytest
 
 SCENES = Path(__file__).parent.parent / "src" / "mjlab_microduck" / "robot" / "microduck"
 
-# The camera is 0.37 m off the floor with a 72.7 deg HFOV; 0.03 m leaves room for the beak and a
-# wall walked into. 15 m covers the 11.2 m vslam room corner to corner.
+# The camera sits 0.2481 m off the floor in the STAND keyframe (0.2306-0.2383 m across the
+# delivered session) with a 72.7 deg HFOV; 0.03 m leaves room for the beak and a wall walked into.
+# 15 m covers the 11.2 m vslam room corner to corner.
 MAX_NEAR_M = 0.03
 MIN_FAR_M = 15.0
 
@@ -25,7 +26,10 @@ def test_slam_scene_near_far_planes_are_metric_and_usable(scene):
     extent = model.stat.extent
     near_m = model.vis.map.znear * extent
     far_m = model.vis.map.zfar * extent
-    assert near_m <= MAX_NEAR_M, f"{scene}: near plane {near_m:.4f} m clips the duck's own view"
+    assert near_m <= MAX_NEAR_M, (
+        f"{scene}: near plane {near_m:.4f} m exceeds the {MAX_NEAR_M} m margin -- "
+        "extent may no longer be pinned"
+    )
     assert far_m >= MIN_FAR_M, f"{scene}: far plane {far_m:.1f} m is too close for the room"
 
 
@@ -36,7 +40,8 @@ def test_slam_scene_near_far_planes_are_metric_exact_contract(scene):
     Task 3's depth test defines ZFAR_M = 20.0 and depends on zfar being exactly that value:
     MuJoCo returns exactly zfar for pixels where no geometry was hit. A downstream mask
     triggers on this exact value, so any deviation silently breaks the contract.
-    Similarly, znear must be exactly 0.02 m to avoid clipping the duck's own view.
+    Similarly, znear must be exactly 0.02 m because extent is pinned to 1.0 and downstream
+    consumers assume this exact metric value, not a value MuJoCo derives from scene geometry.
     """
     model = mujoco.MjModel.from_xml_path(str(SCENES / scene))
     extent = model.stat.extent
