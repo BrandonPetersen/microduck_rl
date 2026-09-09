@@ -121,8 +121,8 @@ class Camera:
         mid-write and got a zero-length ray direction — which MuJoCo answers with
         `mj_ray: vector length is too small` and an abort, taking the simulator down with it. The
         lock is held for the two scene copies and the clock read, which is a couple of
-        milliseconds, and released for the renders, which are twelve each and touch no shared
-        state.
+        milliseconds, and released for the renders, which are ~14 ms combined in `scene_vslam.xml`
+        and touch no shared state.
 
         `sim_time` is read INSIDE the lock, with the scene copy. Read outside it, the timestamp
         would belong to a later world than the pixels — which is the whole failure this bench
@@ -150,7 +150,7 @@ class Camera:
         with self.lock:
             return self.latest
 
-    def wait_frame(self, after_seq: int, timeout: float):
+    def wait_frame(self, after_seq: int, timeout: float) -> tuple[int, float, int, bytes, np.ndarray] | None:
         """Block until a frame newer than `after_seq` is queued; return the OLDEST such, or None.
 
         Returns `(seq, sim_time, mono_ns, uyvy, depth_m)`. Blocking on a bounded QUEUE rather than

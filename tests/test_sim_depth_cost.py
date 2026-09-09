@@ -1,34 +1,41 @@
 """How much the depth pass costs, so a regression in it is visible.
 
-The docstring in camera.py claims 12.2 ms for one 640x360 RGB frame. A depth pass is comparable,
-so a camera should cost ~25 ms a frame. At 15 fps that is 0.4 of a core -- which matters, because
-the daemon's health gate fails below 45 of 50 Hz.
+Rendered against `scene_vslam.xml` (151 geoms) rather than a synthetic one-box fixture: the render
+cost is dominated by copying the scene in `update_scene`, not by shading it, so an empty world
+measures a floor that is roughly half the real cost and would understate the number a later task's
+real-time verdict gets quoted against. The docstring in camera.py claims 12.2 ms for one 640x360
+RGB frame in a real scene; a depth pass adds only ~2 ms on top of that, because the scene copy -- not
+the render -- is what's expensive.
 """
 
 import threading
 import time
+from pathlib import Path
 
 import mujoco
 import numpy as np
 
 from mjlab_microduck.sim.camera import Camera
 
+SCENE_VSLAM = (
+    Path(__file__).parent.parent / "src" / "mjlab_microduck" / "robot" / "microduck" / "scene_vslam.xml"
+)
+
 
 class _World:
-    def __init__(self, model):
+    def __init__(self, model, data):
         self.model = model
-        self.data = mujoco.MjData(model)
+        self.data = data
         self.lock = threading.Lock()
-        mujoco.mj_forward(model, self.data)
 
 
 def test_rgb_plus_depth_render_cost_is_reported(capsys):
-    model = mujoco.MjModel.from_xml_string(
-        '<mujoco><statistic extent="1.0"/><visual><map znear="0.02" zfar="20"/></visual>'
-        '<worldbody><camera name="head_camera" pos="0 0 0" quat="1 0 0 0"/>'
-        '<geom type="box" size="5 5 0.01" pos="0 0 -2"/></worldbody></mujoco>'
-    )
-    world = _World(model)
+    model = mujoco.MjModel.from_xml_path(str(SCENE_VSLAM))
+    data = mujoco.MjData(model)
+    key = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_KEY, "STAND")
+    mujoco.mj_resetDataKeyframe(model, data, key)
+    mujoco.mj_forward(model, data)
+    world = _World(model, data)
     cam = Camera(model, "head_camera", width=640, height=360)
     cam.render(world)  # warm the GL context; the first render pays for setup
     n = 10
@@ -37,5 +44,8 @@ def test_rgb_plus_depth_render_cost_is_reported(capsys):
         cam.render(world)
     ms = (time.perf_counter() - start) / n * 1000.0
     with capsys.disabled():
-        print(f"\nRGB+depth at 640x360: {ms:.1f} ms/frame ({ms * 15 / 1000:.2f} of a core at 15 fps)")
-    assert ms < 100.0, f"{ms:.1f} ms/frame is too slow to keep the sim in real time"
+        print(
+            f"\nRGB+depth at 640x360 ({SCENE_VSLAM.name}): {ms:.1f} ms/frame "
+            f"({ms * 15 / 1000:.2f} of a core at 15 fps)"
+        )
+    assert ms < 40.0, f"{ms:.1f} ms/frame is too slow to keep the sim in real time"
