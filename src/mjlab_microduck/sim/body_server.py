@@ -237,6 +237,9 @@ class Body:
         # The depth sensor, on the model's own `tof` site — so a head that turns takes it along,
         # which is what makes `robot.look` a way to scan a room.
         self.tof = Tof(model, ident(mujoco.mjtObj.mjOBJ_SITE, "tof"), seed=index)
+        # The camera's model id, resolved whether or not this duck renders. `Body.truth` needs it,
+        # and a benchmark wants the true camera pose even from a run with no `--cameras`.
+        self.cam_id = ident(mujoco.mjtObj.mjOBJ_CAMERA, "head_camera")
         # Built only when this duck is one of `--cameras`: a renderer costs 12 ms a frame, which is
         # forty times what stepping four ducks' physics costs.
         self.camera: Camera | None = None
@@ -338,6 +341,34 @@ class Body:
             },
         }
 
+    def truth(self) -> dict:
+        """The pose no robot can measure: where MuJoCo actually put the camera.
+
+        **Not part of the protocol** -- like `trunk` and `sim_time` on `read`, serde drops it on
+        the daemon side. It exists because deriving the camera pose from `robot.state.frames`
+        goes through the robot's own FK, which reads a different MJCF asset: its camera sits
+        3.75 mm from the one the sim renders through, and its frame is rolled 90 deg from the
+        rendered one. For scoring a SLAM trajectory, both of those are error we introduced
+        ourselves.
+
+        `cam_mat` is row-major, MuJoCo camera axes (right, up, backward) in the world frame. To
+        OpenCV optical (right, down, forward): `R @ diag(1, -1, -1)`.
+        """
+        data = self.world.data
+        with self.world.lock:
+            sim_time = float(data.time)
+            cam_pos = [float(v) for v in data.cam_xpos[self.cam_id]]
+            cam_mat = [float(v) for v in data.cam_xmat[self.cam_id].reshape(9)]
+            trunk = [float(v) for v in data.qpos[self.trunk : self.trunk + 3]]
+            trunk_quat = [float(v) for v in data.qpos[self.trunk + 3 : self.trunk + 7]]
+        return {
+            "sim_time": sim_time,
+            "cam_pos": cam_pos,
+            "cam_mat": cam_mat,
+            "trunk": trunk,
+            "trunk_quat": trunk_quat,
+        }
+
     def slow_sensors(self) -> dict:
         return {"volts": NOMINAL_VOLTS, "temps_c": [NOMINAL_TEMP_C] * len(JOINT_NAMES)}
 
@@ -428,6 +459,8 @@ class Handler(socketserver.StreamRequestHandler):
             return body.slow_sensors()
         if op == "tof":
             return body.depth()
+        if op == "truth":
+            return body.truth()
         raise ValueError(f"unknown op {op!r}")
 
 
