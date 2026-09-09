@@ -55,6 +55,15 @@ def test_truth_camera_matrix_is_orthonormal(body):
     assert np.linalg.det(R) == pytest.approx(1.0, abs=1e-6)
 
 
+def test_tof_carries_sim_time(body):
+    """Rung 0's acceptance criterion (b) is `sim_time` on frames, truth AND ToF. Without it the
+    only way to put an 8x8 on the simulator's clock is to assume it belongs to whichever frame was
+    fetched near it -- exactly the guess this bench exists to remove."""
+    tof = body.depth()
+    assert tof["sim_time"] == pytest.approx(float(body.world.data.time))
+    assert len(tof["distance_mm"]) == len(tof["status"]) == tof["rows"] * tof["cols"]
+
+
 def test_dispatch_routes_the_truth_op(body):
     got = Handler.dispatch(None, body, {"op": "truth"})
     assert "cam_pos" in got and "sim_time" in got

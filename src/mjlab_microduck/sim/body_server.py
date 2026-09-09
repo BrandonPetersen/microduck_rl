@@ -377,10 +377,19 @@ class Body:
 
         Sixty-four ray casts, so this is the most expensive thing here — asked for at the sensor's
         own 15 Hz rather than the control loop's 50, exactly as the hardware is.
+
+        `sim_time` rides along, read under the SAME lock as the casts, so it is the instant the
+        ranges are of and not the instant the reply was parsed. **Not part of the protocol** — like
+        `trunk` and `sim_time` on `read`, `tofd`'s `SimDepth` is a plain `Deserialize` and drops it.
+        A benchmark needs it: without it the only way to place an 8x8 on the simulator's clock is to
+        assume it belongs to whatever frame was fetched nearby, which is the guess this bench exists
+        to remove.
         """
         with self.world.lock:
+            sim_time = float(self.world.data.time)
             distance_mm, status = self.tof.frame(self.world.data)
-        return {"rows": ROWS, "cols": COLS, "distance_mm": distance_mm, "status": status}
+        return {"rows": ROWS, "cols": COLS, "distance_mm": distance_mm, "status": status,
+                "sim_time": sim_time}
 
     # ── what the daemon commands ──────────────────────────────────────────
 
