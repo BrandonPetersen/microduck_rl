@@ -254,6 +254,12 @@ class BenchHandler(socketserver.BaseRequestHandler):
         # got a pose up to 480 ms wrong for those frames. Discarding a pre-connection backlog
         # costs nothing: nobody asked for it, and `seq` still starts wherever the sim is, so the
         # gaplessness check is on what was delivered and not on what the sim ever rendered.
+        #
+        # To be exact about the boundary: `ThreadingTCPServer` returns from `accept` before this
+        # thread reaches the latch below, so a render landing in that window is also discarded as
+        # backlog even though the reader was technically already connected. That is bounded to one
+        # frame, once, at the start of a session -- not the "never skips a live frame" the rest of
+        # this class can claim.
         with camera.lock:
             last = camera.seq
         try:

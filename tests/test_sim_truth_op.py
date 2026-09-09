@@ -58,9 +58,16 @@ def test_truth_camera_matrix_is_orthonormal(body):
 def test_tof_carries_sim_time(body):
     """Rung 0's acceptance criterion (b) is `sim_time` on frames, truth AND ToF. Without it the
     only way to put an 8x8 on the simulator's clock is to assume it belongs to whichever frame was
-    fetched near it -- exactly the guess this bench exists to remove."""
+    fetched near it -- exactly the guess this bench exists to remove.
+
+    The world is stepped first on purpose: the fixture leaves `data.time` at 0.0, against which a
+    hardcoded `0.0` would pass too. Seven steps put the clock somewhere only a live read finds."""
+    for _ in range(7):
+        mujoco.mj_step(body.world.model, body.world.data)
+    now = float(body.world.data.time)
+    assert now > 0.0, "the world did not advance; the test cannot tell a live clock from a zero"
     tof = body.depth()
-    assert tof["sim_time"] == pytest.approx(float(body.world.data.time))
+    assert tof["sim_time"] == pytest.approx(now)
     assert len(tof["distance_mm"]) == len(tof["status"]) == tof["rows"] * tof["cols"]
 
 

@@ -8,12 +8,20 @@
          view is 0.3374 m / 0.3324 m, the duck's own body, not the floor (camera sits 0.248 m up
          with a 45 deg vertical FOV, so the nearest floor ray lands ~0.6 m out) -- and depth read
          back under the old and the pinned frustum agrees exactly (max difference 0.000000 m).
-         What pinning actually fixes: extent can no longer move znear/zfar silently on a
-         scene-geometry edit, which was the real fragility. Depth-buffer precision also improves,
-         but the gain is scene-dependent, not a fixed win -- here, with only ~5141 pixels in the
-         1-2 m band, distinct depth values went from 72 to 78 (roughly 13.9 mm to 12.8 mm steps),
-         a much smaller gain than scene_vslam.xml's open room sees from the same fix. Side effect:
-         the viewer's default camera distance is derived from extent too, so it starts closer. -->
+
+         So pinning buys exactly ONE thing, and it is worth having: extent can no longer move
+         znear/zfar silently on a scene-geometry edit. That was the real fragility.
+
+         A depth-buffer PRECISION benefit was claimed here and is RETRACTED as a measurement
+         artefact -- the earlier "distinct depth values went 72 -> 78, ~13.9 mm to ~12.8 mm steps"
+         figure does not survive re-measurement, and neither does scene_vslam.xml's larger version
+         of it (see that file's comment for the numbers). The reasoning was wrong too: for a 1/z
+         buffer, precision is dominated by znear, not zfar, so lowering znear 0.1421 -> 0.02 would
+         if anything DEGRADE mid-range precision. Depth precision is Rung 3's to measure; no
+         replacement number is asserted here.
+
+         Side effect: the viewer's default camera distance is derived from extent too, so it starts
+         closer. -->
     <statistic extent="1.0"/>
 
     <visual>

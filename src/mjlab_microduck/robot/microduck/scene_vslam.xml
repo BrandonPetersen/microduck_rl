@@ -7,12 +7,22 @@
          level and pitched down) the old near plane clipped zero pixels -- the nearest geometry in
          view is 0.3374 m / 0.3324 m, the duck's own body, not the floor (camera sits 0.248 m up
          with a 45 deg vertical FOV, so the nearest floor ray lands ~0.6 m out) -- and depth read
-         back under the old and the pinned frustum agrees to 1.7e-5 m. What pinning actually fixes:
-         extent can no longer move znear/zfar silently on a scene-geometry edit, which was the real
-         fragility. Depth-buffer precision also improves, but the gain is scene-dependent, not a
-         fixed win -- here, where the old zfar spent the buffer on ~1100 m of empty space past the
-         room, distinct depth values in the 1-2 m band (19440 pixels) went from 129 to 219 (roughly
-         7.8 mm to 4.6 mm steps); scene_apartment.xml sees a much smaller gain from the same fix.
+         back under the old and the pinned frustum agrees to 1.7e-5 m.
+
+         So pinning buys exactly ONE thing, and it is worth having: extent can no longer move
+         znear/zfar silently on a scene-geometry edit. That was the real fragility.
+
+         A depth-buffer PRECISION benefit was claimed here and is RETRACTED as a measurement
+         artefact -- the earlier "distinct depth values in the 1-2 m band went 129 -> 219, ~7.8 mm
+         to ~4.6 mm steps" figure does not survive re-measurement. The delivered depth under the
+         pinned frustum has no plateau at all: 18756 pixels in that band take 18756 distinct
+         values, with adjacent spacings of 0.0156 / 0.0447 / 0.227 mm. That is consistent with the
+         1.7e-5 m old-vs-pinned agreement above and with a 19 um median residual against analytic
+         room geometry (docs/validation/00-bench.md). The reasoning behind the claim was wrong too:
+         for a 1/z buffer, precision is dominated by znear, not zfar, so lowering znear
+         0.2238 -> 0.02 would if anything DEGRADE mid-range precision. Depth precision is Rung 3's
+         to measure; no replacement number is asserted here.
+
          Side effect: the viewer's default camera distance is derived from extent too, so it starts
          closer. -->
     <statistic extent="1.0"/>
