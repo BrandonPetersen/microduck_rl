@@ -3,9 +3,15 @@
     <include file="vslam_room.xml" />
 
     <!-- extent is pinned so znear/zfar mean fixed METRES. Auto-derived, this 11.2 m room gave
-         extent 22.378 -> znear 0.2238 m, which clipped the nearest floor in frame, the duck's own
-         beak and any wall it walked up to, in RGB as well as depth. Side effect: the viewer's
-         default camera distance is derived from extent too, so it starts closer. -->
+         extent 22.378 -> znear 0.2238 m / zfar 1118.9 m. Measured, not assumed: in STAND (head
+         level and pitched down) the old near plane clipped zero pixels -- the nearest geometry in
+         view is 0.3374 m / 0.3324 m, the duck's own body, not the floor (camera sits 0.248 m up
+         with a 45 deg vertical FOV, so the nearest floor ray lands ~0.6 m out) -- and depth read
+         back under the old and the pinned frustum agrees to 1.7e-5 m. What pinning actually buys:
+         the old zfar spent the depth buffer on ~1100 m of empty space past the room, so distinct
+         depth values in the 1-2 m band went from 129 to 219 (roughly 7.8 mm to 4.6 mm steps); and
+         extent can no longer move the planes silently on a scene-geometry edit. Side effect: the
+         viewer's default camera distance is derived from extent too, so it starts closer. -->
     <statistic extent="1.0"/>
 
     <visual>
