@@ -248,3 +248,97 @@ session setting.
 4. Read Present Temperature (addr 146) on the four leg servos between attempts;
    limit is 70 C. There is no firmware current ceiling in Position Mode 3.
 5. Expect ~21 mm of rise and a lean-then-push skip, not a symmetric hop.
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HopFree-S50-DR — 2026-09-10, the first symmetric hop
+# ─────────────────────────────────────────────────────────────────────────────
+
+Everything above describes the 2026-09-04 hop in the GROUND-PICK slot. This
+policy replaces it and changes three things about the contract. Read this
+section before deploying it; the rest of the document still describes the obs
+layout, the gain and the safety reasoning correctly.
+
+Artifact: `exports/hopfree_s50_dr_pf4eqwkv.onnx`
+Run: `pollen-robotics/mjlab_microduck/pf4eqwkv` (resumed from `deyrsefz`)
+Task: `Mjlab-HopFree-S50-DR-Sym-K3344-MicroDuck`
+
+## What changed in the contract
+
+1. **SLOT 50 IS NOW A HOP-ENABLE BIT**, not a hard zero. 1.0 while hopping is
+   wanted, 0.0 while standing. It exists because a frozen phase and an
+   advancing phase are indistinguishable at the instant the clock passes
+   through the hold point, and this policy is paid per landing rather than per
+   step in a phase window, so that distinction became load-bearing.
+   `scripts/hop_phase_driver.py --enable-bit` writes it.
+   **This is not backward compatible.** Every earlier policy reads slot 50 as
+   a yaw-rate command: llu5t00x spins and topples when fed 1.0. Use the flag
+   ONLY with this policy.
+
+2. **ONE NETWORK, WALK SLOT ONLY.** Stand and hop are the same policy; the
+   frozen clock is the stand. No ground-pick slot, no two-slot hand-over, and
+   none of the hand-over problems in the section above.
+
+3. **`legs_lowpass` MUST COME DOWN.** The gait runs at ~8.8 Hz. A 0.85 filter
+   at 50 Hz has a cutoff near 1.4 Hz and would attenuate it about six-fold,
+   which does not degrade the gait so much as replace it. Training is
+   unfiltered, so 0.0 is the matched value; the stand was calm at 0.85 and
+   this is the one real conflict between the two behaviours. Start at 0.0 and
+   only raise it if the stand chatters.
+
+## `/etc/robot/robotd.toml`
+
+```toml
+walk = "hopfree_s50_dr_pf4eqwkv.onnx"
+stand = "pose_home.onnx"
+gain = 400              # firmware Position P Gain the policy trained against
+action_scale = 1.0
+legs_lowpass = 0.0      # was 0.85 — see above, this is the important one
+head_lowpass = 0.5
+limp_fall = false       # a fallen robot must not be handed to alpha_stand
+sitstand = "none"       # init's seated-boot heuristic drives the head into the floor
+cmd_alpha = 1.0
+```
+
+Then `sudo systemctl restart robotd` and `sh /tmp/start_driver.sh`, which stops
+padd (its `robot.move` zeros strobe against the driver) and finds the pad by
+name. Add `--enable-bit` to the driver invocation inside that script.
+`sudo systemctl start padd` gives the pad back afterwards.
+
+## What to expect, and what it costs
+
+Measured in sim on the deterministic export, 128 envs, boots at 50 mm sole:
+
+| quantity | value |
+|---|---|
+| CoM gain above the stand, per hop | 28 mm median, 35 mm p90 |
+| hop rate while enabled | ~8.5 Hz |
+| flight per hop | ~100 ms |
+| peak foot force | 31-50 N, i.e. 3.7-5.8x body weight |
+| landing impacts | 25-27 N per foot, every ~115 ms |
+| left/right action asymmetry | exactly 0 (projection baked into the ONNX) |
+| upright after 4 hop bursts | 127-128 of 128 |
+
+**The impacts are the safety story, not the height.** 3 to 6x body weight at
+8.5 Hz is far above the 1.7x the 2026-09-04 policy produced. Hop in SHORT
+bursts, hold the robot or be ready to catch it, and watch motor temperature —
+the earlier hop test stayed under 40 C at a far gentler duty cycle.
+
+## Two things the sim cannot tell us
+
+**The boot is not acting as a spring.** Median compression is 0.65 mm and p95
+is 3.7 mm out of 12 mm of travel; the two boots together store ~0.011 J there,
+which lifts this robot 1.3 mm against a 28 mm hop. The actuators supply ~95%
+of the energy through ground-reaction impulse during 20-40 ms contacts. A
+consequence worth stating plainly: tripling the modelled spring damping moves
+the hop by 1.4 mm and drops nobody, so boot restitution is NOT the transfer
+risk it was assumed to be — and this gait does not demonstrate the springs
+doing useful work.
+
+**Contact is shorter than the control period.** Ground contact lasts one to two
+50 Hz steps, so the impulse is generated inside a window the policy cannot
+close a loop within. Peak joint speed is 14.3 rad/s against a modelled no-load
+speed of 17.8-22.4 rad/s (kt 0.366, R 2.81, vin 6.5-8.2 V), i.e. ~80% of
+no-load, where the motor delivers about a fifth of stall torque. The datasheet
+is ~25% less generous than the model. If the hop is short on hardware, servo
+torque at speed is the first thing to measure, not the boots.
