@@ -131,9 +131,21 @@ class Camera:
         `sim_time` is read INSIDE the lock, with the scene copy. Read outside it, the timestamp
         would belong to a later world than the pixels — which is the whole failure this bench
         exists to remove.
+
+        The camera's own world pose (`cam_xpos`/`cam_xmat`) is captured in this SAME lock, for the
+        same reason: a pose fetched later, over a separate `{"op":"truth"}` round trip, lands
+        20-40 ms after the frame it is supposedly describing (one or two 20 ms physics ticks --
+        measured). Standing, that costs nothing. Walking, the gait swings the head at a session
+        median 50.6 deg/s and up to 102.5 deg/s, so two ticks of lag is 1-4 degrees of orientation
+        error -- which, at a few metres of range, is tens of millimetres of lateral error in
+        anything scored against that pose. Copied to plain floats (not left as views into
+        `MjData`): both arrays alias MjData's own buffer, which the step loop is free to overwrite
+        the instant this lock releases.
         """
         with world.lock:
             sim_time = float(world.data.time)
+            cam_pos = [float(v) for v in world.data.cam_xpos[self.camera]]
+            cam_mat = [float(v) for v in world.data.cam_xmat[self.camera].reshape(9)]
             self.renderer.update_scene(world.data, camera=self.camera)
             self.depth_renderer.update_scene(world.data, camera=self.camera)
         packed = to_uyvy(self.renderer.render())
@@ -146,7 +158,7 @@ class Camera:
             self.latest_depth = depth
             self.sim_time = sim_time
             self.mono_ns = mono_ns
-            self._pending.append((self.seq, sim_time, mono_ns, packed, depth))
+            self._pending.append((self.seq, sim_time, mono_ns, packed, depth, cam_pos, cam_mat))
             self.cond.notify_all()
 
     def frame(self) -> bytes | None:
@@ -154,13 +166,15 @@ class Camera:
         with self.lock:
             return self.latest
 
-    def wait_frame(self, after_seq: int, timeout: float) -> tuple[int, float, int, bytes, np.ndarray] | None:
+    def wait_frame(
+        self, after_seq: int, timeout: float
+    ) -> tuple[int, float, int, bytes, np.ndarray, list[float], list[float]] | None:
         """Block until a frame newer than `after_seq` is queued; return the OLDEST such, or None.
 
-        Returns `(seq, sim_time, mono_ns, uyvy, depth_m)`. Blocking on a bounded QUEUE rather than
-        polling a single "latest" slot is what makes the bench stream gapless. Port 7901 has the
-        opposite arrangement and both of its failure modes: the render loop runs at 16.67 Hz
-        (`passes_per_eye = round((1/15)/0.02) = 3`) while `FrameHandler` re-sends `latest` on its
+        Returns `(seq, sim_time, mono_ns, uyvy, depth_m, cam_pos, cam_mat)`. Blocking on a bounded
+        QUEUE rather than polling a single "latest" slot is what makes the bench stream gapless.
+        Port 7901 has the opposite arrangement and both of its failure modes: the render loop runs
+        at 16.67 Hz (`passes_per_eye = round((1/15)/0.02) = 3`) while `FrameHandler` re-sends `latest` on its
         own 15 Hz timer, so roughly 1.7 frames a second are duplicated or dropped — invisibly,
         because nothing on that wire carries a sequence number.
 
@@ -216,20 +230,32 @@ class FrameServer(socketserver.ThreadingTCPServer):
 # exactly that (`mediad/src/pipeline.rs:969-999`), so it cannot carry a timestamp without breaking
 # the daemon. The bench stream is for a ground-truth benchmark that bypasses `mediad` and WebRTC
 # altogether, so it can afford a real header -- and it carries the ground-truth depth too.
-BENCH_MAGIC = b"DBF1"
-# magic, seq u32, sim_time f64, mono_ns u64, width u16, height u16, rgb_len u32, depth_len u32
-BENCH_HEADER = "<4sIdQHHII"
+#
+# DBF2, not DBF1: the header grew (see below) to carry the camera pose ALONGSIDE the pixels,
+# rather than making a reader fetch it separately over `{"op":"truth"}`. A separate fetch cannot
+# be contemporaneous with the pixels it is meant to describe -- measured, it lands 20-40 ms later,
+# one or two 20 ms physics ticks -- and at a walking session's 50-100 deg/s head rate that is 1-4
+# degrees of orientation error, which is exactly the failure this bench exists to catch, not
+# reproduce. Bumping the magic is deliberate too: a reader built for one version must fail loudly
+# on the other rather than silently misparsing a 36-byte header as a 132-byte one.
+BENCH_MAGIC = b"DBF2"
+# magic, seq u32, sim_time f64, mono_ns u64, width u16, height u16, rgb_len u32, depth_len u32,
+# cam_pos 3x f64, cam_mat 9x f64 (row-major, MuJoCo camera axes right/up/backward in world).
+# Existing fields kept in place and meaning; the pose is appended after them.
+# struct.calcsize("<4sIdQHHII3d9d") == 132 (was 36 for BENCH_HEADER's DBF1 prefix "<4sIdQHHII").
+BENCH_HEADER = "<4sIdQHHII3d9d"
 
 
 def pack_bench_frame(
     seq: int, sim_time: float, mono_ns: int, width: int, height: int,
-    uyvy: bytes, depth: np.ndarray,
+    uyvy: bytes, depth: np.ndarray, cam_pos: list[float], cam_mat: list[float],
 ) -> bytes:
-    """One bench frame: header, then UYVY, then float32 depth in metres."""
+    """One bench frame: header (now including the camera pose), then UYVY, then float32 depth."""
     payload = np.ascontiguousarray(depth, dtype=np.float32).tobytes()
     head = struct.pack(
         BENCH_HEADER, BENCH_MAGIC, seq, float(sim_time), int(mono_ns),
         width, height, len(uyvy), len(payload),
+        *(float(v) for v in cam_pos), *(float(v) for v in cam_mat),
     )
     return head + uyvy + payload
 
@@ -269,11 +295,12 @@ class BenchHandler(socketserver.BaseRequestHandler):
                 got = camera.wait_frame(after_seq=last, timeout=5.0)
                 if got is None:
                     continue  # nothing rendered in 5 s; the sim may be paused
-                seq, sim_time, mono_ns, uyvy, depth = got
+                seq, sim_time, mono_ns, uyvy, depth, cam_pos, cam_mat = got
                 last = seq
                 self.request.sendall(
                     pack_bench_frame(
-                        seq, sim_time, mono_ns, camera.width, camera.height, uyvy, depth
+                        seq, sim_time, mono_ns, camera.width, camera.height, uyvy, depth,
+                        cam_pos, cam_mat,
                     )
                 )
         except (BrokenPipeError, ConnectionResetError, OSError):

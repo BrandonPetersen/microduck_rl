@@ -70,7 +70,7 @@ def test_depth_is_metres_and_matches_the_wall_we_placed():
     cam, _ = _rendered()
     got = cam.wait_frame(after_seq=-1, timeout=1.0)
     assert got is not None
-    _seq, _sim_time, _mono, _uyvy, depth = got
+    _seq, _sim_time, _mono, _uyvy, depth, _cam_pos, _cam_mat = got
     assert depth.shape == (64, 64)
     assert depth.dtype == np.float32
     centre = float(depth[32, 32])
@@ -85,7 +85,7 @@ def test_depth_is_along_the_optical_axis_not_ray_range():
     """A flat wall square to the camera reads the SAME depth at the centre and at the corner.
     Ray range would grow toward the corner by 1/cos(theta)."""
     cam, _ = _rendered()
-    _seq, _st, _mn, _uyvy, depth = cam.wait_frame(after_seq=-1, timeout=1.0)
+    _seq, _st, _mn, _uyvy, depth, _cp, _cm = cam.wait_frame(after_seq=-1, timeout=1.0)
     assert abs(float(depth[2, 2]) - float(depth[32, 32])) < 0.005
 
 
@@ -96,7 +96,7 @@ def test_background_reads_exactly_zfar():
     world = _World(model)
     cam = Camera(model, "head_camera", width=32, height=32)
     cam.render(world)
-    _seq, _st, _mn, _uyvy, depth = cam.wait_frame(after_seq=-1, timeout=1.0)
+    _seq, _st, _mn, _uyvy, depth, _cp, _cm = cam.wait_frame(after_seq=-1, timeout=1.0)
     assert float(depth[16, 16]) == pytest.approx(ZFAR_M, rel=1e-3)
 
 
@@ -114,7 +114,7 @@ def test_render_advances_seq_and_carries_sim_time():
 def test_rgb_and_depth_come_from_the_same_render():
     """Same seq, and the UYVY payload is the documented size."""
     cam, _ = _rendered()
-    seq, _st, _mn, uyvy, depth = cam.wait_frame(after_seq=-1, timeout=1.0)
+    seq, _st, _mn, uyvy, depth, _cp, _cm = cam.wait_frame(after_seq=-1, timeout=1.0)
     assert len(uyvy) == 64 * 64 * 2
     assert depth.size == 64 * 64
     assert seq == 0
@@ -177,7 +177,7 @@ def test_rays_pass_through_pixel_centres_not_pixel_corners(offset, wanted):
     world = _World(model)
     cam = Camera(model, "head_camera", width=w, height=h)
     cam.render(world)
-    _seq, _st, _mn, _uyvy, depth = cam.wait_frame(after_seq=-1, timeout=1.0)
+    _seq, _st, _mn, _uyvy, depth, _cp, _cm = cam.wait_frame(after_seq=-1, timeout=1.0)
 
     cid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, "head_camera")
     pred = _predict_wall_depth(
