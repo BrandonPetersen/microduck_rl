@@ -85,12 +85,15 @@ class HeadStabilizer:
     """
 
     def __init__(self, model, data, body, *, alpha: float = 0.5, yaw_tau: float = 0.5,
-                 damping: float = 1e-3, iters: int = 3, max_dev_deg: float = 20.0):
+                 damping: float = 1e-3, iters: int = 3, max_dev_deg: float = 20.0,
+                 engage_upright: float = 0.8, engage_height: float = 0.10):
         self.alpha = float(alpha)
         self.yaw_tau = float(yaw_tau)
         self.damping = float(damping)
         self.iters = int(iters)
         self.max_dev = np.radians(float(max_dev_deg))
+        self.engage_upright = float(engage_upright)
+        self.engage_height = float(engage_height)
         self.cam_id = body.cam_id
         self.cam_body = int(model.cam_bodyid[self.cam_id])
         # The trunk is the root of this duck's kinematic tree (the body carrying the free joint).
@@ -113,7 +116,13 @@ class HeadStabilizer:
         mujoco.mj_forward(model, data)
         R_trunk0 = data.xmat[self.trunk_body].reshape(3, 3).copy()
         self.yaw_f = _yaw_of(R_trunk0)
-        self.q_home = data.qpos[self.qpos_adr].copy()
+        # The neck's home is the robot's canonical STANDING pose, not whatever it is doing now.
+        # Read live, it came from the SIT keyframe duck-sim starts in -- head_pitch 91.7 deg, the
+        # sitting fold -- and since the solve starts there and the clamp is measured from there,
+        # the gimbal pinned the head folded and the duck could not stand up for 250 s while the
+        # policy commanded it to walk.
+        from .body_server import HOME_POSE, JOINT_NAMES
+        self.q_home = np.array([HOME_POSE[JOINT_NAMES.index(n)] for n in NECK_JOINTS])
 
         # The reference orientation is computed for a LEVEL trunk with the neck at home, on a
         # scratch copy -- NOT read from whatever pose the duck happens to be in right now.
@@ -151,6 +160,23 @@ class HeadStabilizer:
     def step(self, model, data, dt: float) -> None:
         R_cam = data.cam_xmat[self.cam_id].reshape(3, 3)
         R_trunk = data.xmat[self.trunk_body].reshape(3, 3)
+
+        # **Only stabilise a robot that is actually standing.** Getting up from SIT, and getting up
+        # after a fall, are whole-body manoeuvres in which the head is a counterweight the policy is
+        # entitled to move. A gimbal holding the camera level through one of those fights the
+        # manoeuvre -- and once the duck is down it keeps fighting forever, which is exactly how a
+        # capture produced 250 s of a duck lying on its side being told to walk.
+        #
+        # Height is what separates the cases, and it separates them cleanly: SIT sits at 0.070 m and
+        # a fallen duck at 0.049, against 0.118-0.125 standing and walking. Uprightness alone does
+        # NOT -- the trunk is perfectly upright at SIT (cos +1.000), so that test passes while the
+        # robot is still folded on the ground. Both are checked because a duck can also be upright
+        # but low, or high but tipped.
+        # Writing nothing here leaves the daemon's own head command in force, exactly as if off.
+        if R_trunk[2, 2] < self.engage_upright:
+            return
+        if data.qpos[self.trunk_qpos + 2] < self.engage_height:
+            return
 
         # Heading, low-passed: follow where the robot is going, ignore how the gait wags it there.
         yaw = _yaw_of(R_trunk)
