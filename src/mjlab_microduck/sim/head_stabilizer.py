@@ -85,11 +85,12 @@ class HeadStabilizer:
     """
 
     def __init__(self, model, data, body, *, alpha: float = 0.5, yaw_tau: float = 0.5,
-                 damping: float = 1e-3, iters: int = 3):
+                 damping: float = 1e-3, iters: int = 3, max_dev_deg: float = 20.0):
         self.alpha = float(alpha)
         self.yaw_tau = float(yaw_tau)
         self.damping = float(damping)
         self.iters = int(iters)
+        self.max_dev = np.radians(float(max_dev_deg))
         self.cam_id = body.cam_id
         self.cam_body = int(model.cam_bodyid[self.cam_id])
         # The trunk is the root of this duck's kinematic tree (the body carrying the free joint).
@@ -108,19 +109,29 @@ class HeadStabilizer:
         self.lo = model.jnt_range[jnt, 0].copy()
         self.hi = model.jnt_range[jnt, 1].copy()
 
-        # The camera's home orientation with the trunk's heading divided out. Everything the servo
-        # aims at is this, re-planted on the current heading -- so "level" means "as level as it was
-        # standing at home", not an arbitrary world axis.
+        self.trunk_qpos = int(body.trunk)
         mujoco.mj_forward(model, data)
-        R_cam0 = data.cam_xmat[self.cam_id].reshape(3, 3).copy()
         R_trunk0 = data.xmat[self.trunk_body].reshape(3, 3).copy()
-        self.R0 = _rz(-_yaw_of(R_trunk0)) @ R_cam0
         self.yaw_f = _yaw_of(R_trunk0)
-        self._jacr = np.zeros((3, model.nv))
         self.q_home = data.qpos[self.qpos_adr].copy()
-        # The camera's orientation relative to the trunk when the neck sits at home. Everything
-        # below is solved against this, which is what makes the command ABSOLUTE.
-        self.R_mount = R_trunk0.T @ R_cam0
+
+        # The reference orientation is computed for a LEVEL trunk with the neck at home, on a
+        # scratch copy -- NOT read from whatever pose the duck happens to be in right now.
+        #
+        # Reading it live was a real bug with a real cost: `duck-sim` starts at the SIT keyframe, so
+        # the reference became "the camera as it points while sitting". The gimbal then spent the
+        # whole run trying to hold that orientation, fighting the stand-up, and drove the neck into
+        # its stops -- head_pitch pinned at +90 deg, head_yaw swinging 320 deg, roll at both limits.
+        # The duck could not stand at all for 250 s while the policy commanded it to walk. A
+        # reference derived from geometry cannot drift with the startup pose that way.
+        scratch = mujoco.MjData(model)
+        scratch.qpos[:] = data.qpos
+        scratch.qpos[self.trunk_qpos + 3: self.trunk_qpos + 7] = (1.0, 0.0, 0.0, 0.0)
+        scratch.qpos[self.qpos_adr] = self.q_home
+        mujoco.mj_kinematics(model, scratch)
+        mujoco.mj_camlight(model, scratch)
+        self.R0 = scratch.cam_xmat[self.cam_id].reshape(3, 3).copy()
+        self._jacr = np.zeros((3, model.nv))
         # A scratch MjData so the solve can evaluate forward kinematics for a CANDIDATE neck pose
         # without disturbing the live simulation.
         self._scratch = mujoco.MjData(model)
@@ -170,4 +181,11 @@ class HeadStabilizer:
             J = self._jacr[:, self.dof_adr]
             q = np.clip(q + J.T @ np.linalg.solve(J @ J.T + self.damping * np.eye(3), e),
                         self.lo, self.hi)
+        # Never let the gimbal contort the neck. The measured demand is ~+-5 deg of travel
+        # (docs/validation/data/08-neck-demand.txt), so a 20 deg envelope is generous -- and it is
+        # the difference between a gimbal that gives up on a pose it cannot reach and one that
+        # drives into the stops and stops the robot standing, which is what the unclamped version
+        # actually did.
+        q = np.clip(q, np.maximum(self.q_home - self.max_dev, self.lo),
+                    np.minimum(self.q_home + self.max_dev, self.hi))
         data.ctrl[self.act] = q
