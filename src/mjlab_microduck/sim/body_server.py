@@ -109,7 +109,7 @@ def duck_prefix(index: int) -> str:
     return "" if index == 0 else f"d{index}_"
 
 
-def build_world(scene: Path, count: int) -> mujoco.MjModel:
+def build_world(scene: Path, count: int, camera_gimbal: bool = False) -> mujoco.MjModel:
     """One model holding `count` ducks, so they share a floor and can bump into each other.
 
     The scene already contains one duck; the rest are attached to it under a name prefix, which is
@@ -117,7 +117,7 @@ def build_world(scene: Path, count: int) -> mujoco.MjModel:
     ducks in separate physics can be beside each other on a screen and never touch, and "beside each
     other" is what every social behaviour is about.
     """
-    if count == 1:
+    if count == 1 and not camera_gimbal:
         return mujoco.MjModel.from_xml_path(str(scene))
 
     spec = mujoco.MjSpec.from_file(str(scene))
@@ -127,6 +127,13 @@ def build_world(scene: Path, count: int) -> mujoco.MjModel:
         robot = mujoco.MjSpec.from_file(str(ROBOT_ONLY))
         frame = spec.worldbody.add_frame(pos=[0.0, index * SPACING, 0.0])
         spec.attach(robot, prefix=duck_prefix(index), frame=frame)
+    if camera_gimbal:
+        # Done on the spec rather than in the robot MJCF: that file is shared with training and
+        # every other task, and none of them should grow three joints because a SLAM experiment
+        # wanted them.
+        from .camera_gimbal import add_camera_gimbal
+        for index in range(count):
+            add_camera_gimbal(spec, prefix=duck_prefix(index))
     return spec.compile()
 
 
@@ -175,8 +182,8 @@ class World:
     must not wait on the solver, for the same reason a real bus read does not wait on a servo.
     """
 
-    def __init__(self, scene: Path, count: int = 1):
-        self.model = build_world(scene, count)
+    def __init__(self, scene: Path, count: int = 1, camera_gimbal: bool = False):
+        self.model = build_world(scene, count, camera_gimbal)
         self.model.opt.timestep = TIMESTEP
         self.data = mujoco.MjData(self.model)
         self.lock = threading.Lock()
@@ -587,6 +594,16 @@ def main() -> None:
              "odometry needs -- untouched. Overrides the daemon's head command for those four "
              "joints only; the legs stay under the walking policy. See head_stabilizer.py.")
     parser.add_argument(
+        "--camera-gimbal", action="store_true",
+        help="Mount the camera on its own 3-axis gimbal and hold it level there, instead of "
+             "driving the neck. Driving the neck does not work: the walking policy needs its head "
+             "(it moves the neck ~9/6 deg while walking and is rewarded for tracking a head-pose "
+             "command), and commandeering those joints pinned the head and stalled the duck after "
+             "9.76 m where a gimbal-off control walked 30.57 m. These joints are named outside "
+             "JOINT_NAMES, so robotd can neither see nor command them and the policy is untouched. "
+             "Also leaves a `head_camera_rigid` where the camera was, so one capture renders the "
+             "stabilised and unstabilised view of the same walk. See sim/camera_gimbal.py.")
+    parser.add_argument(
         "--stabilize-kp-mult", type=float, default=1.0, metavar="X",
         help="Multiply the four neck actuators' gain and force range. THE SIMULATION-ONLY CHEAT: "
              "scripts/check_head_stabilizer.py measured that at the modelled strength "
@@ -623,7 +640,7 @@ def main() -> None:
     if args.ducks < 1:
         raise SystemExit("--ducks needs at least one duck")
 
-    world = World(args.scene, args.ducks)
+    world = World(args.scene, args.ducks, camera_gimbal=args.camera_gimbal)
     pose, trunk_z = pose_table(args.scene, args.keyframe)
     wanted = set()
     if args.cameras.strip() == "all":
@@ -642,7 +659,12 @@ def main() -> None:
         mujoco.mj_forward(world.model, world.data)
         # The gimbal has to be built AFTER the forward pass: it records the camera's home
         # orientation, and cam_xmat is zero until kinematics have run once.
-        if args.stabilize_head > 0.0:
+        if args.camera_gimbal:
+            from .camera_gimbal import CameraGimbalStabilizer
+            body.head_stab = CameraGimbalStabilizer(world.model, world.data,
+                                                    prefix=body.prefix,
+                                                    alpha=args.stabilize_head or 1.0)
+        elif args.stabilize_head > 0.0:
             from .head_stabilizer import HeadStabilizer
             if args.stabilize_kp_mult != 1.0:
                 slots = [sl for sl, wi in enumerate(body.to_wire)
