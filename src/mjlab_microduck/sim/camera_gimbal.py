@@ -53,7 +53,7 @@ CAMERA = "head_camera"
 # microduck_vslam) with room to spare, and little enough that a runaway cannot point the camera
 # somewhere absurd.
 RANGE_RAD = 0.52                      # +-30 deg
-KP = 8.0                              # a camera is grams; this is a small servo, not a neck one
+KP = 30.0                             # a camera is grams; this is a small servo, not a neck one
 FORCE = 2.0                           # Nm, generous for the load
 
 
@@ -122,9 +122,10 @@ class CameraGimbalStabilizer:
     """
 
     def __init__(self, model, data, *, prefix: str = "", alpha: float = 1.0,
-                 damping: float = 1e-4, iters: int = 4):
+                 damping: float = 1e-4, iters: int = 4, yaw_tau: float = 0.5):
         from .head_stabilizer import _rz, _yaw_of
         self.alpha, self.damping, self.iters = float(alpha), float(damping), int(iters)
+        self.yaw_tau = float(yaw_tau)
         self.cam_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_CAMERA, prefix + CAMERA)
         if self.cam_id < 0:
             raise RuntimeError(f"no camera {prefix + CAMERA!r}; was add_camera_gimbal() applied?")
@@ -152,6 +153,7 @@ class CameraGimbalStabilizer:
         R_ref = scratch.cam_xmat[self.cam_id].reshape(3, 3).copy()
         R_trunk_ref = scratch.xmat[self.trunk_body].reshape(3, 3).copy()
         self.R0 = _rz(-_yaw_of(R_trunk_ref)) @ R_ref
+        self.yaw_f = _yaw_of(data.xmat[self.trunk_body].reshape(3, 3))
         self._jacr = np.zeros((3, model.nv))
         self._scratch = mujoco.MjData(model)
 
@@ -159,9 +161,16 @@ class CameraGimbalStabilizer:
         from .head_stabilizer import _exp_so3, _log_so3, _rz, _yaw_of
         R_cam = data.cam_xmat[self.cam_id].reshape(3, 3)
         R_trunk = data.xmat[self.trunk_body].reshape(3, 3)
-        # Heading follows the body immediately: with no yaw joint there is nothing to filter, and
-        # the camera should look where the robot is going.
-        R_des_full = _rz(_yaw_of(R_trunk)) @ self.R0
+        # **The heading must be FILTERED, not followed.** Tracking the trunk's yaw directly was
+        # measured putting 1.327 deg/frame of gait wobble into the setpoint -- the gimbal then
+        # chased a shaking goal and rejected only 1.11x of the camera's rotation despite swinging
+        # its joints 11-17 deg. The robot's heading genuinely turns (356.8 deg over one lap), so
+        # the filter has to follow the slow turn while rejecting the per-step wobble, which is
+        # what a time constant of a few gait cycles does.
+        yaw = _yaw_of(R_trunk)
+        k = min(dt / max(self.yaw_tau, 1e-6), 1.0)
+        self.yaw_f += np.arctan2(np.sin(yaw - self.yaw_f), np.cos(yaw - self.yaw_f)) * k
+        R_des_full = _rz(self.yaw_f) @ self.R0
         R_des = R_cam @ _exp_so3(self.alpha * _log_so3(R_cam.T @ R_des_full))
 
         self._scratch.qpos[:] = data.qpos
