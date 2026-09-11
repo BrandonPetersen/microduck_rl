@@ -193,6 +193,13 @@ class World:
         """
         with self.lock:
             for _ in range(times):
+                # The head gimbal servos at the PHYSICS rate, not the daemon's 50 Hz: what it is
+                # rejecting is gait-frequency motion, and a controller sampling near that frequency
+                # would chase its own tail. It writes ctrl for the neck only, after the daemon's
+                # targets, so it wins for those four joints and leaves the legs alone.
+                for body in self.bodies:
+                    if body.head_stab is not None and body.released:
+                        body.head_stab.step(self.model, self.data, TIMESTEP)
                 mujoco.mj_step(self.model, self.data)
                 # A duck nobody has enabled yet is put back where it was. Physics is shared, so
                 # it cannot simply not be stepped — and a hand steadying one robot while another
@@ -258,6 +265,9 @@ class Body:
         self.torque_on = not limp
         self.kp = kp
         self.held = None
+        # Set by `enable_head_stabilizer` when --stabilize-head is given; None means the daemon's
+        # own head command stands, which is the default and the behaviour every existing capture has.
+        self.head_stab = None
 
     # ── placement ─────────────────────────────────────────────────────────
 
@@ -568,6 +578,18 @@ def main() -> None:
         "per render, stamped with sim_time. Separate from --frame-port because that one's format "
         "belongs to mediad; this one is for a ground-truth benchmark that bypasses mediad",
     )
+    parser.add_argument(
+        "--stabilize-head", type=float, default=0.0, metavar="ALPHA",
+        help="Drive the four neck joints as a horizon-lock camera gimbal (0 = off, the default "
+             "and what every existing capture used; 1 = full). Pitch and roll are held level in "
+             "the world frame and yaw follows the trunk's heading, which removes the gait's "
+             "rotation from the camera while leaving its TRANSLATION -- the parallax visual "
+             "odometry needs -- untouched. Overrides the daemon's head command for those four "
+             "joints only; the legs stay under the walking policy. See head_stabilizer.py.")
+    parser.add_argument(
+        "--stabilize-yaw-tau", type=float, default=0.5, metavar="SECONDS",
+        help="Time constant of the heading filter the gimbal follows. Long enough to ignore how "
+             "the gait wags the trunk, short enough to follow the robot around a corner.")
     parser.add_argument("--camera-fps", type=int, default=CAMERA_FPS)
     parser.add_argument(
         "--limp",
@@ -609,6 +631,13 @@ def main() -> None:
         # zero-length ray, which MuJoCo answers by aborting the process. Building a renderer takes
         # long enough that `tofd` won every time once cameras were switched on.
         mujoco.mj_forward(world.model, world.data)
+        # The gimbal has to be built AFTER the forward pass: it records the camera's home
+        # orientation, and cam_xmat is zero until kinematics have run once.
+        if args.stabilize_head > 0.0:
+            from .head_stabilizer import HeadStabilizer
+            body.head_stab = HeadStabilizer(world.model, world.data, body,
+                                            alpha=args.stabilize_head,
+                                            yaw_tau=args.stabilize_yaw_tau)
         server = Server((args.host, args.port + index), Handler)
         server.body = body
         threading.Thread(target=server.serve_forever, daemon=True).start()
