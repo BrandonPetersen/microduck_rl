@@ -85,11 +85,11 @@ class HeadStabilizer:
     """
 
     def __init__(self, model, data, body, *, alpha: float = 0.5, yaw_tau: float = 0.5,
-                 gain: float = 0.6, damping: float = 1e-3):
+                 damping: float = 1e-3, iters: int = 3):
         self.alpha = float(alpha)
         self.yaw_tau = float(yaw_tau)
-        self.gain = float(gain)
         self.damping = float(damping)
+        self.iters = int(iters)
         self.cam_id = body.cam_id
         self.cam_body = int(model.cam_bodyid[self.cam_id])
         # The trunk is the root of this duck's kinematic tree (the body carrying the free joint).
@@ -117,6 +117,25 @@ class HeadStabilizer:
         self.R0 = _rz(-_yaw_of(R_trunk0)) @ R_cam0
         self.yaw_f = _yaw_of(R_trunk0)
         self._jacr = np.zeros((3, model.nv))
+        self.q_home = data.qpos[self.qpos_adr].copy()
+        # The camera's orientation relative to the trunk when the neck sits at home. Everything
+        # below is solved against this, which is what makes the command ABSOLUTE.
+        self.R_mount = R_trunk0.T @ R_cam0
+        # A scratch MjData so the solve can evaluate forward kinematics for a CANDIDATE neck pose
+        # without disturbing the live simulation.
+        self._scratch = mujoco.MjData(model)
+
+        # Two failure modes are designed out here, both measured before they were:
+        #  * the neck is REDUNDANT (neck_pitch and head_pitch rotate the camera about exactly
+        #    opposite axes), so any scheme that INTEGRATES joint increments walks the pair up the
+        #    null direction until a joint saturates. Measured: neck_pitch pinned at its +60 deg
+        #    limit within 1.5 s, camera 20 deg off level -- worse than no gimbal.
+        #  * an integrator on top of a slow, weak plant (kp=0.55) rings. Measured: 80 deg of neck
+        #    travel and a camera 52 deg off level.
+        # Solving for the ABSOLUTE joint angles from `q_home` every step has neither failure mode:
+        # there is no accumulated state to drift or oscillate, and the position actuators do the
+        # tracking, so what is left over is the actuator's real limitation rather than the
+        # controller's.
 
     def step(self, model, data, dt: float) -> None:
         R_cam = data.cam_xmat[self.cam_id].reshape(3, 3)
@@ -130,12 +149,25 @@ class HeadStabilizer:
         # alpha scales how much of the correction is applied, same convention as the offline sweep
         R_des = R_cam @ _exp_so3(self.alpha * _log_so3(R_cam.T @ R_des_full))
 
-        w = _log_so3(R_des @ R_cam.T)            # world-frame rotation taking actual -> desired
-        if not np.isfinite(w).all():
-            return
-        mujoco.mj_jacBody(model, data, None, self._jacr, self.cam_body)
-        J = self._jacr[:, self.dof_adr]          # 3 x 4, rotation only
-        JT = J.T
-        dq = JT @ np.linalg.solve(J @ JT + self.damping * np.eye(3), w)
-        target = data.qpos[self.qpos_adr] + self.gain * dq
-        data.ctrl[self.act] = np.clip(target, self.lo, self.hi)
+        # Solve, from home, for the neck pose that puts the camera on target given where the trunk
+        # is NOW. A few damped-least-squares iterations on a scratch copy: the chain is short and
+        # the correction small, so this converges in two or three.
+        self._scratch.qpos[:] = data.qpos
+        q = self.q_home.copy()
+        for _ in range(self.iters):
+            self._scratch.qpos[self.qpos_adr] = q
+            mujoco.mj_kinematics(model, self._scratch)
+            # mj_jacBody reads `cdof`, which mj_kinematics does not fill -- without this the
+            # Jacobian comes back zero, the correction collapses to nothing, and the gimbal
+            # silently does nothing at all while appearing to run.
+            mujoco.mj_comPos(model, self._scratch)
+            mujoco.mj_camlight(model, self._scratch)
+            R_try = self._scratch.cam_xmat[self.cam_id].reshape(3, 3)
+            e = _log_so3(R_des @ R_try.T)
+            if np.linalg.norm(e) < 1e-4:
+                break
+            mujoco.mj_jacBody(model, self._scratch, None, self._jacr, self.cam_body)
+            J = self._jacr[:, self.dof_adr]
+            q = np.clip(q + J.T @ np.linalg.solve(J @ J.T + self.damping * np.eye(3), e),
+                        self.lo, self.hi)
+        data.ctrl[self.act] = q
