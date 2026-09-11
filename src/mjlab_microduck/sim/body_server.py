@@ -378,13 +378,22 @@ class Body:
             cam_mat = [float(v) for v in data.cam_xmat[self.cam_id].reshape(9)]
             trunk = [float(v) for v in data.qpos[self.trunk : self.trunk + 3]]
             trunk_quat = [float(v) for v in data.qpos[self.trunk + 3 : self.trunk + 7]]
-        return {
+            # The camera gimbal's own joints, when it has any. Without these a capture cannot say
+            # whether the stabiliser did anything -- which cost a whole 250 s run and an afternoon
+            # of inferring it from reconstructions that turned out to be wrong themselves.
+            gimbal = None
+            if self.head_stab is not None and hasattr(self.head_stab, "qpos_adr"):
+                gimbal = [float(v) for v in data.qpos[self.head_stab.qpos_adr]]
+        out = {
             "sim_time": sim_time,
             "cam_pos": cam_pos,
             "cam_mat": cam_mat,
             "trunk": trunk,
             "trunk_quat": trunk_quat,
         }
+        if gimbal is not None:
+            out["gimbal"] = gimbal
+        return out
 
     def slow_sensors(self) -> dict:
         return {"volts": NOMINAL_VOLTS, "temps_c": [NOMINAL_TEMP_C] * len(JOINT_NAMES)}
@@ -702,6 +711,17 @@ def main() -> None:
             servers.append(bench)
 
     print(f"== {args.scene.name}: {args.ducks} duck(s), starting at {args.keyframe}", flush=True)
+    # Whether a stabiliser is active has been guessed from /proc/<pid>/cmdline twice now, and an
+    # experiment whose independent variable is invisible in its own log is an experiment waiting to
+    # be misread. Say it plainly, once, where every capture's log keeps it.
+    if args.camera_gimbal:
+        print("==   camera gimbal ACTIVE (3-axis, on its own joints; the neck is the policy's)",
+              flush=True)
+    elif args.stabilize_head > 0.0:
+        print(f"==   neck head stabiliser ACTIVE alpha={args.stabilize_head} "
+              f"kp_mult={args.stabilize_kp_mult}", flush=True)
+    else:
+        print("==   no camera stabilisation", flush=True)
     for index in range(args.ducks):
         eye = (
             f" · camera on {args.host}:{args.frame_port + index}"
