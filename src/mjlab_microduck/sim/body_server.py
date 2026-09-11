@@ -587,6 +587,15 @@ def main() -> None:
              "odometry needs -- untouched. Overrides the daemon's head command for those four "
              "joints only; the legs stay under the walking policy. See head_stabilizer.py.")
     parser.add_argument(
+        "--stabilize-kp-mult", type=float, default=1.0, metavar="X",
+        help="Multiply the four neck actuators' gain and force range. THE SIMULATION-ONLY CHEAT: "
+             "scripts/check_head_stabilizer.py measured that at the modelled strength "
+             "(kp=0.55 Nm/rad, +-0.96 Nm) the gimbal rejects only 1.04x of the gait's rotation, "
+             "i.e. essentially nothing, while the same controller reaches 14.7x at 20x authority. "
+             "Travel is not the constraint (the neck settles at ~4/4/8 deg, well inside its "
+             "limits) -- torque and bandwidth are. Raising this asks what a stronger neck would "
+             "buy, including whether the walk survives the reaction torques.")
+    parser.add_argument(
         "--stabilize-yaw-tau", type=float, default=0.5, metavar="SECONDS",
         help="Time constant of the heading filter the gimbal follows. Long enough to ignore how "
              "the gait wags the trunk, short enough to follow the robot around a corner.")
@@ -635,6 +644,17 @@ def main() -> None:
         # orientation, and cam_xmat is zero until kinematics have run once.
         if args.stabilize_head > 0.0:
             from .head_stabilizer import HeadStabilizer
+            if args.stabilize_kp_mult != 1.0:
+                slots = [sl for sl, wi in enumerate(body.to_wire)
+                         if JOINT_NAMES[wi] in ("neck_pitch", "head_pitch", "head_yaw", "head_roll")]
+                # Scale `body._gain`, NOT the model directly: `_apply_torque` rewrites
+                # actuator_gainprm from `_gain` every time the daemon touches torque or kp, so a
+                # multiplier written straight into the model would be silently reset the moment
+                # robotd enables torque -- and the boosted run would quietly be an unboosted one.
+                body._gain[slots] *= args.stabilize_kp_mult
+                body._apply_torque()
+                world.model.actuator_forcerange[[body.actuators[sl] for sl in slots]] *= \
+                    args.stabilize_kp_mult
             body.head_stab = HeadStabilizer(world.model, world.data, body,
                                             alpha=args.stabilize_head,
                                             yaw_tau=args.stabilize_yaw_tau)
