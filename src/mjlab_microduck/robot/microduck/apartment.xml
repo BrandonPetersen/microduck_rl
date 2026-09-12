@@ -98,8 +98,12 @@
           pos="-2.20 0.00 -0.005" material="floor_main" contype="1" conaffinity="1"/>
     <geom name="floor_e" type="box" size="2.00 3.00 0.005"
           pos=" 2.00 0.00 -0.005" material="floor_main" contype="1" conaffinity="1"/>
-    <geom name="floor_corridor_s" type="box" size="0.20 0.80 0.005"
-          pos="-0.20 -2.20 -0.005" material="floor_main" contype="1" conaffinity="1"/>
+    <!-- Extended north to y=-0.70 to meet floor_corridor_n. It used to stop at y=-1.40, leaving a
+       0.70 m strip of corridor with no floor at all -- in the COLLIDABLE and the decorative layer
+       both, so the apartment had a hole you could see through and fall into. A duck walking the
+       corridor during a 250 s capture found it at (-0.06, -0.78) and fell to z=-1205 m. -->
+  <geom name="floor_corridor_s" type="box" size="0.20 1.15 0.005"
+          pos="-0.20 -1.85 -0.005" material="floor_main" contype="1" conaffinity="1"/>
     <geom name="floor_corridor_n" type="box" size="0.20 1.85 0.005"
           pos="-0.20  1.15 -0.005" material="floor_main" contype="1" conaffinity="1"/>
 
@@ -128,8 +132,8 @@
     <!-- Corridor floor: the two strips that flank the staircase hole (avoids covering it). -->
     <geom name="floor_cor_n" type="box" size="0.20 1.85 0.002"
           pos="-0.20 1.15 0.002" material="floor_corridor" contype="0" conaffinity="0"/>
-    <geom name="floor_cor_s" type="box" size="0.20 0.80 0.002"
-          pos="-0.20 -2.20 0.002" material="floor_corridor" contype="0" conaffinity="0"/>
+    <geom name="floor_cor_s" type="box" size="0.20 1.15 0.002"
+          pos="-0.20 -1.85 0.002" material="floor_corridor" contype="0" conaffinity="0"/>
     <!-- Rugs as local accents on top. -->
     <geom name="rug_living" type="box" size="0.80 0.50 0.004"
           pos="-2.50 -1.00 0.005" material="rug_mat" contype="0" conaffinity="0"/>
