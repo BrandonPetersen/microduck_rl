@@ -176,6 +176,18 @@ def _servo_joint_ids(env: "ManagerBasedRlEnv", asset: Entity) -> list:
     return ids
 
 
+def _env_origin_z(env: "ManagerBasedRlEnv", env_ids: torch.Tensor) -> torch.Tensor:
+    """Terrain height of each env's origin. Every spawn function that writes an
+    ABSOLUTE trunk z must add this: on rough terrain (slope pyramids put the
+    platform well above z=0) an absolute z of 0.05-0.09 m puts the robot inside
+    the terrain → contact explosion → returns/value/std blow up. This is what
+    killed the first rough+backlash velstand run (wy8gcaus, 2026-09-10): stable
+    until prone spawns switched on at iter 700, then value loss 0.6 → 42 and
+    entropy 5 → 33, in lockstep with prone_prob. Flat runs never noticed
+    (origin z = 0)."""
+    return env.scene.env_origins[env_ids.long(), 2]
+
+
 def _servo_joint_pos(env: "ManagerBasedRlEnv", asset: Entity) -> torch.Tensor:
     return asset.data.joint_pos[:, _servo_joint_ids(env, asset)]
 
@@ -4425,7 +4437,7 @@ def set_random_ground_state(
     new_z = torch.where(is_sit, z_sit, new_z)
     new_z = torch.where(is_stand, z_stand, new_z)
 
-    env.sim.data.qpos[env_ids, 2]   = new_z
+    env.sim.data.qpos[env_ids, 2]   = new_z + _env_origin_z(env, env_ids)
     env.sim.data.qpos[env_ids, 3:7] = new_quat
     env.sim.data.qvel[env_ids, :6]  = 0.0
 
@@ -4536,7 +4548,7 @@ def set_random_crouch_state(
     z = z_stand + lam * (z_deep - z_stand) \
         + torch.rand(num, device=env.device) * 0.01
 
-    env.sim.data.qpos[env_ids, 2] = z
+    env.sim.data.qpos[env_ids, 2] = z + _env_origin_z(env, env_ids)
     env.sim.data.qpos[env_ids, 3:7] = quat
     env.sim.data.qpos[env_ids, 7:] = joints
     env.sim.data.qvel[env_ids, :] = 0.0
@@ -4575,8 +4587,14 @@ def maybe_set_random_prone_orientation(
     side_prob: float = 0.0,
     joint_random_prob: float = 0.0,
     joint_range_frac: float = 0.8,
+    joint_random_extra_z: float = 0.06,
 ):
     """Reset event that overrides orientation to prone with probability `prone_prob`.
+
+    ``joint_random_extra_z``: extra spawn clearance for the joint-randomized
+    envs. Randomly folded legs reach ~10 cm below the trunk; on rough terrain
+    they interpenetrate a step/slope at spawn (measured 800-1200 N spikes vs
+    ~110 N for HOME joints). The short extra drop costs ~70 N.
 
     ``side_prob`` (fraction of the prone slice lying on a side) is passed through
     to set_random_prone_orientation.
@@ -4625,11 +4643,12 @@ def maybe_set_random_prone_orientation(
         )
         # Override z so the prone body has head/neck clearance when settling.
         z = torch.rand(len(selected), device=env.device) * (prone_z_max - prone_z_min) + prone_z_min
-        env.sim.data.qpos[selected, 2] = z
+        env.sim.data.qpos[selected, 2] = z + _env_origin_z(env, selected)
         if joint_random_prob > 0.0:
             jr = selected[torch.rand(len(selected), device=env.device) < joint_random_prob]
             if len(jr) > 0:
                 randomize_servo_joints_uniform(env, jr, asset_cfg=asset_cfg, range_frac=joint_range_frac)
+                env.sim.data.qpos[jr, 2] += joint_random_extra_z
     if len(crouch_selected) > 0:
         set_random_crouch_state(env, crouch_selected, asset_cfg=asset_cfg)
 
@@ -7038,7 +7057,7 @@ def reset_roulade_state(
     z_mid = torch.rand(num, device=env.device) * (midroll_z_max - midroll_z_min) + midroll_z_min
     new_z = torch.where(is_mid, z_mid, z_stand)
 
-    env.sim.data.qpos[env_ids, 2] = new_z
+    env.sim.data.qpos[env_ids, 2] = new_z + _env_origin_z(env, env_ids)
     env.sim.data.qpos[env_ids, 3:7] = quat
     env.sim.data.qvel[env_ids, :6] = 0.0
 

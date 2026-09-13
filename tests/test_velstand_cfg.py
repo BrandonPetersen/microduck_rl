@@ -402,3 +402,16 @@ def test_randomize_servo_joints_uniform_respects_limits(monkeypatch):
     assert pos.shape == (4, 14) and (written["vel"] == 0).all()
     assert (pos[:, :7].abs() <= 0.8 + 1e-6).all() and (pos[:, 7].abs() <= 2.4 + 1e-6).all()
     assert pos.std() > 0.3  # actually randomized, not HOME
+
+
+# ── Rough-terrain spawns: absolute z must be offset by the env origin ────────
+
+def test_prone_spawn_adds_terrain_origin_z():
+    """wy8gcaus lesson: an absolute trunk z on rough terrain spawned robots inside the slope pyramids."""
+    class _Scene(dict):
+        env_origins = torch.tensor([[0.0, 0.0, 0.0], [1.0, 0.0, 0.30], [2.0, 0.0, 0.12], [3.0, 0.0, 0.05]])
+    env = _SpawnEnv(4); env.scene = _Scene(robot=object())
+    microduck_mdp.maybe_set_random_prone_orientation(env, torch.arange(4), prone_prob=1.0, prone_z_min=0.07, prone_z_max=0.07)
+    z = env.sim.data.qpos[:, 2]
+    assert torch.allclose(z, torch.tensor([0.07, 0.37, 0.19, 0.12]), atol=1e-6)
+    assert (torch.rad2deg(torch.acos((1 - 2 * (env.sim.data.qpos[:, 4] ** 2 + env.sim.data.qpos[:, 5] ** 2)).clamp(-1, 1))) > 89).all()
