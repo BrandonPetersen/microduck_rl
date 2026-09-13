@@ -361,22 +361,13 @@ def test_load_expert_is_frozen_copy():
 
 # ── Run-4 fix: post-fall-like prone spawns + stall weight ───────────────────
 
-def test_prone_init_randomizes_joints_for_post_fall_like_spawns():
-    cfg = vs.make_microduck_velstand_env_cfg()
-    p = cfg.events["random_prone_init"].params
-    assert 0.5 <= p["joint_random_prob"] < 1.0          # most prone spawns post-fall-like, some keep HOME
-    assert 0.5 <= p["joint_range_frac"] <= 0.9
-    # Run-5 lesson: stall is also what a slow careful push-up looks like — keep it mild.
-    assert -0.1 <= vs.SERVO_STALL_WEIGHT < 0
-    assert cfg.curriculum["servo_stall_weight"].params["weight_stages"][-1]["weight"] == vs.SERVO_STALL_WEIGHT
-
-
-def test_post_discovery_regularization():
-    # Skill exists via BC → smoothness back on while fallen, violent rises priced, fallen BC loosened, anchor firm.
-    assert 0.25 <= vs.FALLEN_SMOOTHNESS_SCALE <= 0.6
-    assert vs.GENTLE_RISE_WEIGHT >= 0.02
-    alg = vs.MicroduckVelStandRlCfg.algorithm
-    assert 0.1 <= alg.bc_cfg["coef"] <= 0.5 < alg.bc_cfg["anchor_coef"] <= 1.0
+def test_reference_recipe_constants():
+    """This cfg IS the recipe of the published reference (6op8a8u8@5999, commit d3edc1f).
+    Runs 5-6 changed these and were rolled back (see cfg docstring). Change deliberately."""
+    assert vs.EXPERT_BC_COEF == 1.0 and vs.FALLEN_SMOOTHNESS_SCALE == 0.1
+    assert vs.SERVO_STALL_WEIGHT == -0.05 and vs.GENTLE_RISE_WEIGHT == 0.005
+    p = vs.make_microduck_velstand_env_cfg().events["random_prone_init"].params
+    assert p.get("joint_random_prob", 0.0) == 0.0  # post-fall-like spawns OFF in the reference recipe
 
 
 def test_randomize_servo_joints_uniform_respects_limits(monkeypatch):

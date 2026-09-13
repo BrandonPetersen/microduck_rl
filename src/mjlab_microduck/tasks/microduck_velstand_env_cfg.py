@@ -16,12 +16,6 @@ What changed vs the 2026-07 design (kept below, still valid):
     its final stage (WARM_START) — re-running them from stage 0 would re-teach
     the walk under easier conditions and drift it. Only velstand's own phases
     ramp, and they are ~2× shorter than the from-scratch schedule.
-    REFERENCE RUN (best policy so far, published 2026-09-10): wandb 6op8a8u8,
-    checkpoint model_5999.pt, code = commit d3edc1f (git tag velstand-best-6op8a8u8),
-    4096 envs, 6000 iterations on COACH2, launched EXACTLY as the LAUNCH line below
-    (MICRODUCK_WARM_START=1 set; wandb args: Mjlab-VelStand-Flat-MicroDuck
-    --env.scene.num-envs 4096 --agent.resume True --wandb-run-path
-    pollen-robotics/mjlab_microduck/441tzs6d --wandb-checkpoint-name model_3750.pt).
     LAUNCH:  MICRODUCK_WARM_START=1 uv run train Mjlab-VelStand-Flat-MicroDuck \
                --env.scene.num-envs 4096 --agent.resume True \
                --wandb-run-path pollen-robotics/mjlab_microduck/441tzs6d \
@@ -105,39 +99,39 @@ Run-3 lesson (wandb 4lflk7ii, @1060): IT STANDS UP from front and back — and
   everything the reward adds on top. BC lr 3e-4, min mini-batch 512. 40-iter
   check at 64 envs with 50% prone spawns + 1 m/s pushes: fallen frac 0.44 →
   0.33 while upright lin-vel error stayed 0.22 m/s (run 3's recipe destroyed
-  the walk in 12 iterations under milder conditions).
-
-Run-4 (wandb 6op8a8u8) WORKS, on the robot too. Benchmark vs the deployed
-  walk→limp→stand pipeline (sim, 3 seeds): recovers 88-95% vs 83-86% of push
-  falls, 2.7 s vs 3.3 s median, zero servo-housing contact vs 50 ms/fall, trunk
-  impact 0 vs 14 N, stall halved; forward speed equal to the walk expert; head
-  impact EQUAL (~32 N) — still the open target. Robot feedback + sim
-  reproduction: (a) convulsions rising from the BACK after a real fall — sim:
-  face-up LANDINGS after a push recover 58% (ckpt 1750) → 77% (5750) vs 100%
-  from a face-up SPAWN; the stand expert has the same hole (71%). Cause: spawns
-  start at HOME joints, a real fall leaves the legs anywhere. Fix here:
-  PRONE_JOINT_RANDOM_PROB of the prone slice gets uniformly random servo joints
-  (central 80% of limits) + servo_stall ×3. (b) backward overshoot after a
-  front stand-up on the robot — NOT reproduced in sim (0/192 re-falls), a
-  sim2real gap to chase with a recording. Turn-in-place yaw rate drifted
-  0.34 → 0.12 rad/s over training (parked, not critical now).
-  Relaunch as a plain RESUME of 6op8a8u8 (curricula already final), not a
-  warm start: `uv run train ... --agent.resume True --wandb-run-path
-  pollen-robotics/mjlab_microduck/6op8a8u8 --wandb-checkpoint-name model_5999.pt`.
-
-Run-5 (wandb axr82ws4, resume of 5999 +1000 iters with post-fall-like spawns
-  and servo_stall ×3): NO gain on randomized-joint face-up spawns (85% → 82%,
-  seed noise) and WORSE on the robot: more aggressive rises, overshoot and fall
-  back. Sim agrees: ckpt 7000 re-falls after a front stand-up 9/188 (5999: 0)
-  with |Δa| during the rise 0.23 vs 0.10. Two causes: (1) servo_stall ×3 —
-  "high torque at low velocity" IS a slow careful push-up, so the policy went
-  ballistic instead; reverted to -0.05. (2) Teacher ceiling: the stand expert
-  itself is 83% on these spawns and BC coef 1.0 pins the student there; coef
-  0.3 on fallen frames (anchor stays 1.0). Plus, now that the skill exists:
-  fallen smoothness scale 0.1 → 0.4 and gentle_rise ×4 to damp thrash and
-  violent rises. Resume from 5999 (the published reference), not 7000. Impact costs were confirmed real but weak (face-plant
+  the walk in 12 iterations under milder conditions). Impact costs were confirmed real but weak (face-plant
   spikes 129 N at 0.5% of steps ≈ -0.3 per fall vs ~7/step walking) — to be
   raised ×5 once recoveries exist, not before.
+
+Run-4 (wandb 6op8a8u8) WORKS, on the robot too → published reference. Sim
+  benchmark vs the deployed walk→limp→stand pipeline (3 seeds): recovers 88-95%
+  vs 83-86% of push falls, 2.7 s vs 3.3 s median, zero servo-housing contact vs
+  50 ms/fall, trunk impact 0 vs 14 N, stall halved; forward speed equal to the
+  walk expert; head impact EQUAL (~32 N) — the open target. Turn-in-place yaw
+  rate drifted 0.34 → 0.12 rad/s over training (parked, not critical).
+  Robot feedback: (a) convulsions rising from the BACK after a real fall — in sim
+  face-up LANDINGS after a push recover 58-77% vs 100% from a face-up SPAWN; the
+  stand expert has the same hole (71%): a real fall leaves the legs anywhere,
+  HOME-pose spawns never show that. (b) occasional backward overshoot after a
+  front stand-up — NOT reproduced in sim (0/192 re-falls).
+
+Runs 5-6 (axr82ws4, padquu42; resumed from 5999) — ROLLED BACK 2026-09-13:
+  tried post-fall-like prone spawns (randomize_servo_joints_uniform, kept in
+  mdp.py, OFF here), servo_stall ×3, then fallen smoothness 0.4 / gentle_rise ×4
+  / BC coef 0.3. Lessons: servo_stall ×3 made the rise BALLISTIC ("high torque at
+  low velocity" IS a slow careful push-up) — robot overshoot + fall back; the
+  stand expert is only 83% on randomized-joint face-up spawns and the student
+  plateaued there (teacher ceiling); run 6 gave a mild push-recovery gain but
+  face-up stayed at 85% and front stand-ups re-fell 9/190 (5999: 0/192), cause
+  unknown. Not better than 5999 on the robot → back to this recipe.
+
+Rough+backlash run 1 (wy8gcaus) — CATASTROPHIC, root cause FIXED in mdp.py:
+  every fallen-spawn function wrote an ABSOLUTE trunk z (0.05-0.09 m); rough env
+  origins span 0-0.21 m (slope pyramids) → robots spawned inside the terrain
+  from iter 700 (prone spawns on) → value loss 0.6 → 42, entropy 5 → 33. Spawn z
+  is now origin-relative (_env_origin_z). The flat run with the same constants
+  was stable throughout. Prod recipe = THIS file on
+  Mjlab-VelStand-Rough-Backlash-MicroDuck, warm start from 6op8a8u8@5999.
 
 REBASED (2026-07, audit follow-up) on the velocity recipe — the proven
 walker — instead of the abandoned older recipe the old velstand used.
@@ -296,17 +290,12 @@ RECOVERY_ECON_KICKIN_ITER = 600 if WARM_START else 1200
 # distill the deployed stand expert into the fallen frames (see distill.py).
 # The expert recovers 100% face-down/up and 95% side on this model in ~1 s.
 ENABLE_EXPERT_BC = True
-EXPERT_BC_COEF = 0.3            # was 1.0. Run-5 lesson: the stand expert is only 83% on post-fall-like
-                                # face-up spawns and the student plateaued at the same 82-85% under coef 1.0
-                                # (teacher ceiling). Loosened so PPO's recovery rewards can refine past it;
-                                # the walk anchor stays at 1.0.
+EXPERT_BC_COEF = 1.0
 EXPERT_BC_GATE_TILT_DEG = 35.0
 
 # Run-1 fix (1): smoothness taxes scaled down while fallen so get-up attempts
 # are affordable; full weight while upright (the walk's smoothness is untouched).
-FALLEN_SMOOTHNESS_SCALE = 0.4   # was 0.1 while the skill was being discovered (runs 2-4); the skill exists
-                                # now (BC), so the tax comes back to damp convulsions/thrash while fallen —
-                                # the AGENTS.md "smoothness AFTER discovery" step.
+FALLEN_SMOOTHNESS_SCALE = 0.1
 
 # Servo-protection costs ramp (see docstring). 25% from step 0 keeps the
 # gradient alive; full weight after the recovery economics are in place.
@@ -316,11 +305,8 @@ SERVO_IMPACT_WEIGHT = -0.02     # per N above 2 N on servo housings, per step
 HEAD_IMPACT_WEIGHT = -0.01      # per N above 15 N on the head subtree
 TRUNK_IMPACT_WEIGHT = -0.01     # per N above 20 N on the trunk shell
 SERVO_ACC_SPIKE_WEIGHT = -1e-3  # per rad/s² above 300 (summed over servos)
-SERVO_STALL_WEIGHT = -0.05      # per stalled servo per step. Run-5 lesson: ×3 (-0.15) made the rise
-                                # BALLISTIC — "high torque at low velocity" is exactly a slow careful
-                                # push-up, so the policy stopped doing those (robot: overshoot + fall back).
-GENTLE_RISE_WEIGHT = 0.02       # POSITIVE: trunk_vertical_accel_penalty is self-negating. ×4 after run 5
-                                # (aggressive rises): prices |a_z| of the trunk during the rise directly.
+SERVO_STALL_WEIGHT = -0.05      # per stalled servo per step
+GENTLE_RISE_WEIGHT = 0.005      # POSITIVE: trunk_vertical_accel_penalty is self-negating
 SERVO_IMPACT_THRESH_N = 2.0
 HEAD_IMPACT_THRESH_N = 15.0
 TRUNK_IMPACT_THRESH_N = 20.0
@@ -361,13 +347,6 @@ FALLEN_TIMEOUT_S = 8.0
 # Crouch slice 0.15 → 0.20 and from iter 150: it doubles as stand-tall data.
 _PRONE_ITERS = (150, 700, 1000, 1400) if WARM_START else (800, 1500, 2000, 2500)
 PRONE_SIDE_PROB = 0.5
-# Post-fall-like prone spawns (run-4 robot feedback): this fraction of the prone
-# slice gets servo joints re-sampled over the central 80% of their ranges; the
-# rest keeps HOME (daemon stand-from-init). Measured post-fall face-up joints:
-# hip_roll at its ±0.38 limit, head_yaw to -1.7, knees -0.2..0.7 — nothing a
-# HOME-pose spawn ever shows.
-PRONE_JOINT_RANDOM_PROB = 0.7
-PRONE_JOINT_RANGE_FRAC = 0.8
 PRONE_RAMP_STAGES = [
     {"step": 0,                                   "params": {"prone_prob": 0.00, "face_down_prob": 1.0,  "side_prob": PRONE_SIDE_PROB, "crouch_prob": 0.00}},
     {"step": _PRONE_ITERS[0] * NUM_STEPS_PER_ENV, "params": {"prone_prob": 0.00, "face_down_prob": 1.0,  "side_prob": PRONE_SIDE_PROB, "crouch_prob": 0.20}},
@@ -607,8 +586,6 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
             "prone_prob": 0.0,        # ramped by the prone_init_prob curriculum
             "face_down_prob": 1.0,
             "side_prob": PRONE_SIDE_PROB,
-            "joint_random_prob": PRONE_JOINT_RANDOM_PROB,
-            "joint_range_frac": PRONE_JOINT_RANGE_FRAC,
             "prone_z_min": 0.05,
             "prone_z_max": 0.09,
             "crouch_prob": 0.0,       # ramped by the prone_init_prob curriculum
