@@ -3,6 +3,7 @@
 
 import argparse
 import csv
+import json
 import math
 import os
 import pickle
@@ -802,26 +803,42 @@ class PolicyInference:
 
 
 # ---------------------------------------------------------------------------
-# Odometry anchor-point overlay (--odom-anchor-points)
+# Odometry anchor points (--odom-anchor-points, --odom-compare)
 #
-# The robot's odometry (microduck/odometry/src/lib.rs) tracks the trunk from
-# the lowest of eight "sole corners": four per foot, at ±SOLE_HALF_LEN along the
-# foot-site X axis and ±SOLE_HALF_WIDTH along Y, on the site's Z = 0 plane.
-# Those half-extents are still the v1.5 sole bbox placeholders. This overlay
-# draws them on the simulated robot so we can see where they land relative to
-# the real alpha sole mesh, and highlights the corner the odometry would pick
-# as its contact anchor (the lowest one).
+# The robot's contact odometry (microduck/odometry/src/lib.rs) tracks the trunk
+# from the lowest of a set of candidate contact points on the soles, expressed
+# in each foot's site frame. scripts/odom_anchor_points.py samples those sets
+# on the sole mesh and writes them to scripts/odom_anchor_sets.json:
+#   v15      the legacy ±27.0 x ±20.6 mm bbox on the site plane (production)
+#   alpha4   the flat patch's four corners, on the mesh
+#   alpha16  a 4x4 grid over the whole footprint, on the mesh
+# --odom-anchor-points draws them; --odom-compare runs a Python replica of the
+# estimator per set on the simulated legs + a perfect IMU and scores each
+# against MuJoCo's ground-truth trunk pose.
 # ---------------------------------------------------------------------------
 
-# Mirror of the constants in microduck/odometry/src/lib.rs.
-ODOM_SOLE_HALF_LEN = 0.0270     # foot-site X (front/back), metres
-ODOM_SOLE_HALF_WIDTH = 0.0206   # foot-site Y (left/right), metres
-ODOM_CORNERS = np.array([
-    [ODOM_SOLE_HALF_LEN, ODOM_SOLE_HALF_WIDTH, 0.0],
-    [ODOM_SOLE_HALF_LEN, -ODOM_SOLE_HALF_WIDTH, 0.0],
-    [-ODOM_SOLE_HALF_LEN, -ODOM_SOLE_HALF_WIDTH, 0.0],
-    [-ODOM_SOLE_HALF_LEN, ODOM_SOLE_HALF_WIDTH, 0.0],
-])  # ordered around the rectangle so consecutive rows share an edge
+ODOM_ANCHOR_SETS_JSON = os.path.join(os.path.dirname(os.path.abspath(__file__)), "odom_anchor_sets.json")
+ODOM_SET_RGBA = {
+    "v15": (0.1, 0.5, 1.0, 1.0),       # blue
+    "alpha4": (0.1, 0.9, 0.3, 1.0),    # green
+    "alpha16": (1.0, 0.3, 1.0, 1.0),   # magenta
+}
+_ODOM_FALLBACK_RGBA = (1.0, 0.8, 0.1, 1.0)
+
+
+def load_odom_anchor_sets(names="all"):
+    """{name: [left (N,3), right (N,3)]} from the generated JSON, in the order
+    the file lists them; `names` is 'all' or a comma-separated subset."""
+    with open(ODOM_ANCHOR_SETS_JSON) as f:
+        sets = json.load(f)["sets"]
+    if names != "all":
+        wanted = names.split(",")
+        missing = [n for n in wanted if n not in sets]
+        if missing:
+            raise SystemExit(f"unknown odometry anchor set(s) {missing}; have {list(sets)}")
+        sets = {n: sets[n] for n in wanted}
+    return {n: [np.asarray(v["left"], dtype=np.float64), np.asarray(v["right"], dtype=np.float64)]
+            for n, v in sets.items()}
 
 
 def _quat2mat(q):
@@ -830,92 +847,208 @@ def _quat2mat(q):
     return m.reshape(3, 3)
 
 
-class OdomAnchorOverlay:
-    """Draw the odometry's sole corners into viewer.user_scn every frame.
-
-    Per foot: the four v1.5 corners (spheres) joined into a rectangle, the
-    real sole mesh's bbox in the same site frame as a second rectangle for
-    comparison, and the site origin. The lowest corner of all eight -- the
-    odometry's anchor candidate -- is drawn bigger and red.
-    """
-
-    CORNER_RGBA = (0.1, 0.5, 1.0, 1.0)      # v1.5 odometry corners: blue
-    CORNER_RGBA_LEFT = (0.1, 0.9, 0.3, 1.0)  # ... left foot: green
-    ANCHOR_RGBA = (1.0, 0.1, 0.1, 1.0)       # lowest corner: red
-    MESH_RGBA = (1.0, 0.8, 0.1, 0.9)         # real sole mesh bbox: yellow
-    SITE_RGBA = (1.0, 1.0, 1.0, 1.0)
+class FootFrames:
+    """Foot-site poses relative to the trunk, and the trunk's world pose — what
+    the robot's odometry gets from FK and the IMU, here from the simulator."""
 
     def __init__(self, model):
-        self.model = model
-        self.feet = []
+        self.trunk = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "trunk_base")
+        self.sites = []
         for side in ("left", "right"):
             sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{side}_foot")
             if sid < 0:
-                raise RuntimeError(f"scene has no '{side}_foot' site; odometry corners need it")
-            mesh_bbox = self._sole_mesh_bbox_in_site(sid, f"{side}_foot_collision")
-            self.feet.append((side, sid, mesh_bbox))
+                raise RuntimeError(f"scene has no '{side}_foot' site; the odometry needs it")
+            self.sites.append(sid)
 
-        print("\nOdometry anchor points (v1.5 placeholders, in the foot-site frame):")
-        print(f"  half-extents  X ±{ODOM_SOLE_HALF_LEN*1000:.1f} mm   Y ±{ODOM_SOLE_HALF_WIDTH*1000:.1f} mm   Z = 0")
-        for side, _sid, bbox in self.feet:
-            if bbox is None:
-                print(f"  {side}: no '{side}_foot_collision' mesh geom in this scene, skipping mesh bbox")
-                continue
-            lo, hi = bbox
-            print(f"  {side} sole mesh bbox in site frame (mm): "
-                  f"X [{lo[0]*1000:+.1f}, {hi[0]*1000:+.1f}]  "
-                  f"Y [{lo[1]*1000:+.1f}, {hi[1]*1000:+.1f}]  "
-                  f"Z [{lo[2]*1000:+.1f}, {hi[2]*1000:+.1f}]")
-        print("  viewer: blue/green = odometry corners, red = lowest (anchor candidate), "
-              "yellow = real sole mesh bbox at its bottom Z, white = site origin")
+    def trunk_world(self, data):
+        return data.xpos[self.trunk].copy(), data.xmat[self.trunk].reshape(3, 3).copy()
 
-    def _sole_mesh_bbox_in_site(self, sid, geom_name):
-        """AABB of the sole collision mesh, expressed in the foot site's frame.
+    def feet_in_trunk(self, data):
+        p_t, R_t = self.trunk_world(data)
+        out = []
+        for sid in self.sites:
+            out.append((R_t.T @ (data.site_xpos[sid] - p_t), R_t.T @ data.site_xmat[sid].reshape(3, 3)))
+        return out
 
-        Site and geom hang off the same body, so both poses are body-relative
-        and the mesh vertices (already centred by the compiler, with the
-        centring folded into geom_pos/quat) go body -> site with one transform.
-        """
-        m = self.model
-        gid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
-        if gid < 0 or m.geom_type[gid] != mujoco.mjtGeom.mjGEOM_MESH:
-            return None
-        if m.geom_bodyid[gid] != m.site_bodyid[sid]:
-            print(f"  WARNING: {geom_name} and its foot site are on different bodies; skipping mesh bbox")
-            return None
-        mid = m.geom_dataid[gid]
-        v0, n = m.mesh_vertadr[mid], m.mesh_vertnum[mid]
-        verts = m.mesh_vert[v0:v0 + n].astype(np.float64)
-        in_body = verts @ _quat2mat(m.geom_quat[gid]).T + m.geom_pos[gid]
-        in_site = (in_body - m.site_pos[sid]) @ _quat2mat(m.site_quat[sid])
-        return in_site.min(axis=0), in_site.max(axis=0)
+    def feet_world(self, data):
+        return [(data.site_xpos[sid].copy(), data.site_xmat[sid].reshape(3, 3).copy()) for sid in self.sites]
 
-    def draw(self, data, scn):
-        scn.ngeom = 0
-        corners_world = []   # (foot index, corner index, world pos)
-        for fi, (side, sid, bbox) in enumerate(self.feet):
-            pos = data.site_xpos[sid]
-            rot = data.site_xmat[sid].reshape(3, 3)
-            pts = ODOM_CORNERS @ rot.T + pos
-            for ci, p in enumerate(pts):
-                corners_world.append((fi, ci, p))
-            rgba = self.CORNER_RGBA_LEFT if side == "left" else self.CORNER_RGBA
-            self._polygon(scn, pts, 0.0008, rgba)
-            self._sphere(scn, pos, 0.002, self.SITE_RGBA)
-            if bbox is not None:
-                lo, hi = bbox
-                z = lo[2]   # the mesh's bottom: where the sole actually meets the floor
-                rect = np.array([[hi[0], hi[1], z], [hi[0], lo[1], z],
-                                 [lo[0], lo[1], z], [lo[0], hi[1], z]])
-                self._polygon(scn, rect @ rot.T + pos, 0.0005, self.MESH_RGBA)
 
-        lowest = min(corners_world, key=lambda c: c[2][2])
-        for fi, ci, p in corners_world:
-            if (fi, ci) == lowest[:2]:
-                self._sphere(scn, p, 0.005, self.ANCHOR_RGBA)
+class PyOdometry:
+    """Line-for-line replica of microduck/odometry/src/lib.rs `Odometry::update`
+    for one anchor set: anchor the lowest sole point to the ground, orient the
+    trunk by the IMU, move the anchor when another point drops below it and
+    holds the claim for SWITCH_CONFIRM_TICKS."""
+
+    SWITCH_MARGIN = -0.010
+    SWITCH_CONFIRM_TICKS = 2
+
+    def __init__(self, name, corners):
+        self.name = name
+        self.corners = corners            # [left (N,3), right (N,3)] in the site frames
+        self.anchor_foot = 0
+        self.anchor_local = np.zeros(3)
+        self.anchor_xy = np.zeros(2)
+        self.position = np.zeros(3)
+        self.pending = None               # (foot, local, world_xy)
+        self.pending_ticks = 0
+        self.needs_init = True
+
+    def update(self, feet, R):
+        """feet: [(pos, rot)] of the two foot sites in the trunk frame; R: the
+        IMU's trunk-in-world rotation (3x3)."""
+        if self.needs_init:
+            self.anchor_xy = (R @ feet[self.anchor_foot][0])[:2].copy()
+            self.needs_init = False
+        self._reproject(R, feet)
+        cand = self._lowest_corner(R, feet)
+        if cand is None:
+            self.pending = None
+            self.pending_ticks = 0
+        else:
+            foot, local, world_xy = cand
+            if self.pending is not None and self.pending[0] == foot:
+                self.pending_ticks += 1
             else:
-                rgba = self.CORNER_RGBA_LEFT if self.feet[fi][0] == "left" else self.CORNER_RGBA
-                self._sphere(scn, p, 0.003, rgba)
+                self.pending = cand
+                self.pending_ticks = 1
+            if self.pending_ticks >= self.SWITCH_CONFIRM_TICKS:
+                foot, local, world_xy = self.pending
+                self.pending = None
+                self.anchor_foot = foot
+                self.anchor_local = local
+                self.anchor_xy = world_xy
+                self._reproject(R, feet)
+                self.pending_ticks = 0
+
+    def _reproject(self, R, feet):
+        pos, rot = feet[self.anchor_foot]
+        contact = R @ (rot @ self.anchor_local + pos)
+        self.position = np.array([self.anchor_xy[0] - contact[0], self.anchor_xy[1] - contact[1], -contact[2]])
+
+    def _lowest_corner(self, R, feet):
+        lowest = -self.SWITCH_MARGIN
+        best = None
+        for foot, (pos, rot) in enumerate(feet):
+            world = self.position + (self.corners[foot] @ rot.T + pos) @ R.T
+            i = int(np.argmin(world[:, 2]))
+            if world[i, 2] < lowest:
+                lowest = world[i, 2]
+                best = (foot, self.corners[foot][i].copy(), world[i, :2].copy())
+        return best
+
+    def anchor_world(self, feet, R):
+        pos, rot = feet[self.anchor_foot]
+        return self.position + R @ (rot @ self.anchor_local + pos)
+
+
+class OdomCompare:
+    """Run one PyOdometry per anchor set at the control rate and score each
+    against the simulator's trunk pose. The IMU is perfect (true trunk
+    rotation), so the sets differ only by their contact geometry."""
+
+    def __init__(self, model, sets):
+        self.frames = FootFrames(model)
+        self.odoms = [PyOdometry(n, c) for n, c in sets.items()]
+        self.start = None
+        self.path_len = 0.0
+        self.last_gt = None
+        self.ticks = 0
+        self.max_err = {o.name: 0.0 for o in self.odoms}
+        print("\nOdometry comparison: " + ", ".join(f"{o.name} ({len(o.corners[0])} pts/foot)" for o in self.odoms))
+
+    def step(self, data):
+        p_t, R_t = self.frames.trunk_world(data)
+        feet = self.frames.feet_in_trunk(data)
+        if self.start is None:
+            self.start = p_t.copy()
+            self.last_gt = p_t.copy()
+        self.path_len += float(np.linalg.norm((p_t - self.last_gt)[:2]))
+        self.last_gt = p_t.copy()
+        self.ticks += 1
+        for o in self.odoms:
+            o.update(feet, R_t)
+            self.max_err[o.name] = max(self.max_err[o.name], self._err_xy(o, p_t))
+
+    def _err_xy(self, o, p_t):
+        return float(np.linalg.norm(o.position[:2] - (p_t - self.start)[:2]))
+
+    def _line(self, data, final=False):
+        p_t, _ = self.frames.trunk_world(data)
+        parts = []
+        for o in self.odoms:
+            exy = self._err_xy(o, p_t) * 1000
+            ez = (o.position[2] - p_t[2]) * 1000
+            foot = "L" if o.anchor_foot == 0 else "R"
+            parts.append(f"{o.name}: xy {exy:5.1f} mm  z {ez:+5.1f} mm  [{foot}]")
+        head = f"[odom {self.ticks / 50:.0f}s  path {self.path_len:.2f} m]"
+        return head + "  " + "  |  ".join(parts)
+
+    def print_status(self, data):
+        print(self._line(data))
+
+    def print_summary(self, data):
+        p_t, _ = self.frames.trunk_world(data)
+        print("\nOdometry comparison summary (perfect IMU; errors vs MuJoCo trunk pose)")
+        print(f"  {self.ticks / 50:.1f} s, ground-truth XY path {self.path_len:.3f} m")
+        print(f"  {'set':>8}  {'pts':>3}  {'final xy err':>12}  {'max xy err':>10}  {'xy err / path':>13}  {'final z err':>11}")
+        for o in self.odoms:
+            exy = self._err_xy(o, p_t)
+            ez = o.position[2] - p_t[2]
+            rel = f"{100 * exy / self.path_len:.1f} %" if self.path_len > 0.05 else "   n/a"
+            print(f"  {o.name:>8}  {len(o.corners[0]):>3}  {exy * 1000:9.1f} mm  {self.max_err[o.name] * 1000:7.1f} mm  {rel:>13}  {ez * 1000:+8.1f} mm")
+
+    def anchors_world(self, data):
+        """[(name, world point)] — where each replica believes it stands, drawn
+        on the real foot so a wrong anchor shows as a floating sphere."""
+        feet = self.frames.feet_world(data)
+        out = []
+        for o in self.odoms:
+            pos, rot = feet[o.anchor_foot]
+            out.append((o.name, rot @ o.anchor_local + pos))
+        return out
+
+
+class OdomAnchorOverlay:
+    """Draw anchor sets into viewer.user_scn every frame: each set's points on
+    both feet in the set's colour (4-point sets also as a rectangle), the
+    lowest point of each set in red, the foot-site origin in white, and, with
+    --odom-compare, each replica's current anchor as a big sphere."""
+
+    ANCHOR_RGBA = (1.0, 0.1, 0.1, 1.0)
+    SITE_RGBA = (1.0, 1.0, 1.0, 1.0)
+
+    def __init__(self, model, sets):
+        self.frames = FootFrames(model)
+        self.sets = sets
+        print("\nOdometry anchor points drawn: " + ", ".join(
+            f"{n} ({len(c[0])} pts/foot, {self._colour_name(n)})" for n, c in sets.items())
+            + "; red = lowest point of a set, white = foot site")
+
+    @staticmethod
+    def _colour_name(name):
+        return {"v15": "blue", "alpha4": "green", "alpha16": "magenta"}.get(name, "yellow")
+
+    def draw(self, data, scn, compare=None):
+        scn.ngeom = 0
+        feet = self.frames.feet_world(data)
+        for pos, _rot in feet:
+            self._sphere(scn, pos, 0.002, self.SITE_RGBA)
+        for name, corners in self.sets.items():
+            rgba = ODOM_SET_RGBA.get(name, _ODOM_FALLBACK_RGBA)
+            world = [corners[f] @ rot.T + pos for f, (pos, rot) in enumerate(feet)]
+            lowest = min(((f, i) for f in range(2) for i in range(len(world[f]))), key=lambda fi: world[fi[0]][fi[1], 2])
+            for f in range(2):
+                if len(world[f]) == 4:
+                    self._polygon(scn, world[f], 0.0006, rgba)
+                for i, p in enumerate(world[f]):
+                    if (f, i) == lowest:
+                        self._sphere(scn, p, 0.0035, self.ANCHOR_RGBA)
+                    else:
+                        self._sphere(scn, p, 0.002, rgba)
+        if compare is not None:
+            for name, p in compare.anchors_world(data):
+                self._sphere(scn, p, 0.006, ODOM_SET_RGBA.get(name, _ODOM_FALLBACK_RGBA))
 
     @staticmethod
     def _sphere(scn, pos, radius, rgba):
@@ -983,10 +1116,15 @@ def main():
                         help="Soften foot contact: solref time constant (s) for the foot geoms "
                              "(default sim ~0.02 = stiff/rigid). Larger = softer, to emulate the "
                              "compliant PU sole. e.g. --foot-solref 0.04")
-    parser.add_argument("--odom-anchor-points", action="store_true",
-                        help="Draw the odometry's sole anchor corners (the v1.5 half-extents from "
-                             "microduck/odometry) on both feet, the real sole mesh bbox for comparison, "
-                             "and highlight the lowest corner the odometry would anchor on")
+    parser.add_argument("--odom-anchor-points", nargs="?", const="all", default=None, metavar="SETS",
+                        help="Draw the odometry's candidate contact points on both feet, from "
+                             "scripts/odom_anchor_sets.json: 'all' (default when given bare) or a "
+                             "comma-separated subset of v15,alpha4,alpha16. Red = lowest point of a set.")
+    parser.add_argument("--odom-compare", action="store_true",
+                        help="Run a replica of the robot's contact odometry per anchor set on the "
+                             "simulated legs (perfect IMU) and print each set's error against the "
+                             "true trunk pose every second and at exit. Drives the robot around to "
+                             "compare drift; combine with --odom-anchor-points to see each anchor.")
     args = parser.parse_args()
 
     if not args.walking and not args.standing and not args.sitstand:
@@ -1365,9 +1503,11 @@ def main():
 
     with TerminalInput() as term, \
          mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
-        odom_overlay = OdomAnchorOverlay(model) if args.odom_anchor_points else None
+        odom_overlay = OdomAnchorOverlay(model, load_odom_anchor_sets(args.odom_anchor_points)) \
+            if args.odom_anchor_points else None
+        odom_compare = OdomCompare(model, load_odom_anchor_sets()) if args.odom_compare else None
         if odom_overlay is not None:
-            odom_overlay.draw(data, viewer.user_scn)
+            odom_overlay.draw(data, viewer.user_scn, odom_compare)
         viewer.sync()
         start_time = time.time()
 
@@ -1495,8 +1635,12 @@ def main():
                 for _ in range(decimation):
                     mujoco.mj_step(model, data)
 
+                if odom_compare is not None:
+                    odom_compare.step(data)
+                    if control_step_count % 50 == 0:
+                        odom_compare.print_status(data)
                 if odom_overlay is not None:
-                    odom_overlay.draw(data, viewer.user_scn)
+                    odom_overlay.draw(data, viewer.user_scn, odom_compare)
                 viewer.sync()
 
                 elapsed = time.time() - step_start
@@ -1508,6 +1652,8 @@ def main():
             print("\n\nKeyboardInterrupt received (Ctrl+C). Saving data...")
 
     print("\nInference stopped.")
+    if odom_compare is not None:
+        odom_compare.print_summary(data)
 
     if csv_data is not None and len(csv_data) > 0:
         print(f"\nSaving {len(csv_data)} steps to: {args.save_csv}")
