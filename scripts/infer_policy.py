@@ -801,6 +801,147 @@ class PolicyInference:
             self.data.ctrl[5:9] += self.head_offset
 
 
+# ---------------------------------------------------------------------------
+# Odometry anchor-point overlay (--odom-anchor-points)
+#
+# The robot's odometry (microduck/odometry/src/lib.rs) tracks the trunk from
+# the lowest of eight "sole corners": four per foot, at ±SOLE_HALF_LEN along the
+# foot-site X axis and ±SOLE_HALF_WIDTH along Y, on the site's Z = 0 plane.
+# Those half-extents are still the v1.5 sole bbox placeholders. This overlay
+# draws them on the simulated robot so we can see where they land relative to
+# the real alpha sole mesh, and highlights the corner the odometry would pick
+# as its contact anchor (the lowest one).
+# ---------------------------------------------------------------------------
+
+# Mirror of the constants in microduck/odometry/src/lib.rs.
+ODOM_SOLE_HALF_LEN = 0.0270     # foot-site X (front/back), metres
+ODOM_SOLE_HALF_WIDTH = 0.0206   # foot-site Y (left/right), metres
+ODOM_CORNERS = np.array([
+    [ODOM_SOLE_HALF_LEN, ODOM_SOLE_HALF_WIDTH, 0.0],
+    [ODOM_SOLE_HALF_LEN, -ODOM_SOLE_HALF_WIDTH, 0.0],
+    [-ODOM_SOLE_HALF_LEN, -ODOM_SOLE_HALF_WIDTH, 0.0],
+    [-ODOM_SOLE_HALF_LEN, ODOM_SOLE_HALF_WIDTH, 0.0],
+])  # ordered around the rectangle so consecutive rows share an edge
+
+
+def _quat2mat(q):
+    m = np.zeros(9)
+    mujoco.mju_quat2Mat(m, np.asarray(q, dtype=np.float64))
+    return m.reshape(3, 3)
+
+
+class OdomAnchorOverlay:
+    """Draw the odometry's sole corners into viewer.user_scn every frame.
+
+    Per foot: the four v1.5 corners (spheres) joined into a rectangle, the
+    real sole mesh's bbox in the same site frame as a second rectangle for
+    comparison, and the site origin. The lowest corner of all eight -- the
+    odometry's anchor candidate -- is drawn bigger and red.
+    """
+
+    CORNER_RGBA = (0.1, 0.5, 1.0, 1.0)      # v1.5 odometry corners: blue
+    CORNER_RGBA_LEFT = (0.1, 0.9, 0.3, 1.0)  # ... left foot: green
+    ANCHOR_RGBA = (1.0, 0.1, 0.1, 1.0)       # lowest corner: red
+    MESH_RGBA = (1.0, 0.8, 0.1, 0.9)         # real sole mesh bbox: yellow
+    SITE_RGBA = (1.0, 1.0, 1.0, 1.0)
+
+    def __init__(self, model):
+        self.model = model
+        self.feet = []
+        for side in ("left", "right"):
+            sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"{side}_foot")
+            if sid < 0:
+                raise RuntimeError(f"scene has no '{side}_foot' site; odometry corners need it")
+            mesh_bbox = self._sole_mesh_bbox_in_site(sid, f"{side}_foot_collision")
+            self.feet.append((side, sid, mesh_bbox))
+
+        print("\nOdometry anchor points (v1.5 placeholders, in the foot-site frame):")
+        print(f"  half-extents  X ±{ODOM_SOLE_HALF_LEN*1000:.1f} mm   Y ±{ODOM_SOLE_HALF_WIDTH*1000:.1f} mm   Z = 0")
+        for side, _sid, bbox in self.feet:
+            if bbox is None:
+                print(f"  {side}: no '{side}_foot_collision' mesh geom in this scene, skipping mesh bbox")
+                continue
+            lo, hi = bbox
+            print(f"  {side} sole mesh bbox in site frame (mm): "
+                  f"X [{lo[0]*1000:+.1f}, {hi[0]*1000:+.1f}]  "
+                  f"Y [{lo[1]*1000:+.1f}, {hi[1]*1000:+.1f}]  "
+                  f"Z [{lo[2]*1000:+.1f}, {hi[2]*1000:+.1f}]")
+        print("  viewer: blue/green = odometry corners, red = lowest (anchor candidate), "
+              "yellow = real sole mesh bbox at its bottom Z, white = site origin")
+
+    def _sole_mesh_bbox_in_site(self, sid, geom_name):
+        """AABB of the sole collision mesh, expressed in the foot site's frame.
+
+        Site and geom hang off the same body, so both poses are body-relative
+        and the mesh vertices (already centred by the compiler, with the
+        centring folded into geom_pos/quat) go body -> site with one transform.
+        """
+        m = self.model
+        gid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_GEOM, geom_name)
+        if gid < 0 or m.geom_type[gid] != mujoco.mjtGeom.mjGEOM_MESH:
+            return None
+        if m.geom_bodyid[gid] != m.site_bodyid[sid]:
+            print(f"  WARNING: {geom_name} and its foot site are on different bodies; skipping mesh bbox")
+            return None
+        mid = m.geom_dataid[gid]
+        v0, n = m.mesh_vertadr[mid], m.mesh_vertnum[mid]
+        verts = m.mesh_vert[v0:v0 + n].astype(np.float64)
+        in_body = verts @ _quat2mat(m.geom_quat[gid]).T + m.geom_pos[gid]
+        in_site = (in_body - m.site_pos[sid]) @ _quat2mat(m.site_quat[sid])
+        return in_site.min(axis=0), in_site.max(axis=0)
+
+    def draw(self, data, scn):
+        scn.ngeom = 0
+        corners_world = []   # (foot index, corner index, world pos)
+        for fi, (side, sid, bbox) in enumerate(self.feet):
+            pos = data.site_xpos[sid]
+            rot = data.site_xmat[sid].reshape(3, 3)
+            pts = ODOM_CORNERS @ rot.T + pos
+            for ci, p in enumerate(pts):
+                corners_world.append((fi, ci, p))
+            rgba = self.CORNER_RGBA_LEFT if side == "left" else self.CORNER_RGBA
+            self._polygon(scn, pts, 0.0008, rgba)
+            self._sphere(scn, pos, 0.002, self.SITE_RGBA)
+            if bbox is not None:
+                lo, hi = bbox
+                z = lo[2]   # the mesh's bottom: where the sole actually meets the floor
+                rect = np.array([[hi[0], hi[1], z], [hi[0], lo[1], z],
+                                 [lo[0], lo[1], z], [lo[0], hi[1], z]])
+                self._polygon(scn, rect @ rot.T + pos, 0.0005, self.MESH_RGBA)
+
+        lowest = min(corners_world, key=lambda c: c[2][2])
+        for fi, ci, p in corners_world:
+            if (fi, ci) == lowest[:2]:
+                self._sphere(scn, p, 0.005, self.ANCHOR_RGBA)
+            else:
+                rgba = self.CORNER_RGBA_LEFT if self.feet[fi][0] == "left" else self.CORNER_RGBA
+                self._sphere(scn, p, 0.003, rgba)
+
+    @staticmethod
+    def _sphere(scn, pos, radius, rgba):
+        if scn.ngeom >= scn.maxgeom:
+            return
+        g = scn.geoms[scn.ngeom]
+        mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_SPHERE, np.array([radius, 0, 0]),
+                            np.asarray(pos, dtype=np.float64), np.eye(3).flatten(),
+                            np.array(rgba, dtype=np.float32))
+        scn.ngeom += 1
+
+    @staticmethod
+    def _polygon(scn, pts, width, rgba):
+        n = len(pts)
+        for i in range(n):
+            if scn.ngeom >= scn.maxgeom:
+                return
+            g = scn.geoms[scn.ngeom]
+            mujoco.mjv_initGeom(g, mujoco.mjtGeom.mjGEOM_CAPSULE, np.zeros(3), np.zeros(3),
+                                np.eye(3).flatten(), np.array(rgba, dtype=np.float32))
+            mujoco.mjv_connector(g, mujoco.mjtGeom.mjGEOM_CAPSULE, width,
+                                 np.asarray(pts[i], dtype=np.float64),
+                                 np.asarray(pts[(i + 1) % n], dtype=np.float64))
+            scn.ngeom += 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run ONNX policy in MuJoCo")
     parser.add_argument("--roller", action="store_true", help="Use roller skate robot XML (robot_walk_rollers.xml)")
@@ -842,6 +983,10 @@ def main():
                         help="Soften foot contact: solref time constant (s) for the foot geoms "
                              "(default sim ~0.02 = stiff/rigid). Larger = softer, to emulate the "
                              "compliant PU sole. e.g. --foot-solref 0.04")
+    parser.add_argument("--odom-anchor-points", action="store_true",
+                        help="Draw the odometry's sole anchor corners (the v1.5 half-extents from "
+                             "microduck/odometry) on both feet, the real sole mesh bbox for comparison, "
+                             "and highlight the lowest corner the odometry would anchor on")
     args = parser.parse_args()
 
     if not args.walking and not args.standing and not args.sitstand:
@@ -1220,6 +1365,9 @@ def main():
 
     with TerminalInput() as term, \
          mujoco.viewer.launch_passive(model, data, show_left_ui=False, show_right_ui=False) as viewer:
+        odom_overlay = OdomAnchorOverlay(model) if args.odom_anchor_points else None
+        if odom_overlay is not None:
+            odom_overlay.draw(data, viewer.user_scn)
         viewer.sync()
         start_time = time.time()
 
@@ -1347,6 +1495,8 @@ def main():
                 for _ in range(decimation):
                     mujoco.mj_step(model, data)
 
+                if odom_overlay is not None:
+                    odom_overlay.draw(data, viewer.user_scn)
                 viewer.sync()
 
                 elapsed = time.time() - step_start
