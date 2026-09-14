@@ -1,432 +1,432 @@
-# Policy `roller_standup` — se relever sur rollers
+# Policy `roller_standup` — getting back up on roller skates
 
-**But** : le microduck (sur rollers) part du sol — à plat ventre ou à plat dos — et se remet **debout sur ses roues**, puis **tient** la station.
+**Goal**: the microduck (on rollers) starts from the ground — face-down or face-up — and gets back **up onto its wheels**, then **holds** the stand.
 
-- **Tâche** : `Mjlab-RollerStandUp-Flat-MicroDuck`
-- **Fichier** : `src/mjlab_microduck/tasks/microduck_roller_standup_env_cfg.py`
-- **Base** : dérivée de l'env roller (`velocity_rollers`) → même robot, même physique/DR, **même observation 61D** (interchangeable au runtime, chargeable via `--new-cmd-obs`).
-- **Spec** : `docs/superpowers/specs/2026-08-04-roller-standup-design.md`
-- **Politique aveugle** : pas de scan de terrain ; proprioception + `projected_gravity`.
+- **Task**: `Mjlab-RollerStandUp-Flat-MicroDuck`
+- **File**: `src/mjlab_microduck/tasks/microduck_roller_standup_env_cfg.py`
+- **Base**: derived from the roller env (`velocity_rollers`) → same robot, same physics/DR, **same 61D observation** (runtime-swappable, loadable via `--new-cmd-obs`).
+- **Spec**: `docs/superpowers/specs/2026-08-04-roller-standup-design.md`
+- **Blind policy**: no terrain scan; proprioception + `projected_gravity`.
 
-## Hauteurs (mesurées, pas devinées)
+## Heights (measured, not guessed)
 
-| pose | modèle pieds | modèle rollers |
+| pose | feet model | rollers model |
 |---|---|---|
-| debout | 0.1172 → `STAND_Z=0.115` sous charge | 0.1407 → **`ROLLER_STAND_Z=0.138`** |
-| à plat ventre (repos) | 0.075 | 0.075 |
-| à plat dos (repos) | 0.048 | 0.048 |
+| standing | 0.1172 → `STAND_Z=0.115` under load | 0.1407 → **`ROLLER_STAND_Z=0.138`** |
+| face-down (rest) | 0.075 | 0.075 |
+| face-up (rest) | 0.048 | 0.048 |
 
-Les hauteurs de repos au sol sont identiques aux deux modèles : c'est la coque du tronc qui touche, pas les pieds.
+The ground rest heights are identical on both models: it is the trunk shell that touches, not the feet.
 
-## ⚠️ Indices de joints — vue SERVO-ONLY (14 joints)
+## ⚠️ Joint indices — SERVO-ONLY view (14 joints)
 
-Les récompenses de pose indexent via `mdp._servo_joint_pos`, qui sélectionne
-`^(?!passive_).*` : les 14 servos, **sans** les roues ni les charnières de backlash. Les
-indices s'écrivent donc dans cette vue canonique, identique au marcheur :
+The pose rewards index through `mdp._servo_joint_pos`, which selects
+`^(?!passive_).*`: the 14 servos, **without** the wheels or the backlash hinges. The
+indices are therefore written in that canonical view, identical to the walker's:
 
 ```
-0-4   jambe gauche      5-8   cou / tête      9-13  jambe droite
+0-4   left leg      5-8   neck / head      9-13  right leg
 ```
-`_LEG_JOINTS = [0-4, 9-13]`, `_NECK_JOINTS = [5-8]`. Plus de `_WHEEL_JOINTS` : les roues
-n'existent pas dans cette vue, et leur DR les cible par la regex `^passive_.*wheel`.
+`_LEG_JOINTS = [0-4, 9-13]`, `_NECK_JOINTS = [5-8]`. No more `_WHEEL_JOINTS`: the wheels
+do not exist in that view, and their DR targets them through the `^passive_.*wheel` regex.
 
-**Ne pas « corriger » vers les positions du tableau complet** (`[0-4, 11-15]`, roues
-intercalées en 5,6 et 16,17) : c'était juste avant la migration de `mdp.py`, et ça rend l'env
-inentraînable depuis. Voir la régression décrite en bas de ce document. Verrouillé sur les
-modèles rollers ET rollers+backlash par
+**Do not "fix" these back to full-array positions** (`[0-4, 11-15]`, wheels interleaved at
+5,6 and 16,17): that was correct before the `mdp.py` migration, and it has made the env
+untrainable ever since. See the regression described further down. Locked on both the rollers
+and rollers+backlash models by
 `tests/test_roller_standup_cfg.py::test_joint_indices_are_in_the_canonical_servo_space`.
 
-## Reset — départ au sol
+## Reset — ground start
 
-`set_random_ground_state` : ventre (`prone_z` 0.076–0.09, plancher relevé car le ventre ne décolle du sol qu'à 0.0752) / dos / **déjà debout** (`standing_z` 0.134–0.144), ± 10° de bruit en pitch/roll. Pas de bucket « assis ». Le bucket « debout » est nécessaire : sans lui la policy monte mais ne tient pas.
+`set_random_ground_state`: face-down (`prone_z` 0.076–0.09, floor raised because the belly only clears the ground from 0.0752) / face-up / **already standing** (`standing_z` 0.134–0.144), ±10° of pitch/roll noise. No "sitting" bucket. The "standing" bucket is necessary: without it the policy learns to rise but not to hold, and falls right back down.
 
-**Curriculum `ground_state_mix`** (easy → hard, le dos en dernier) :
+Face-up spawns additionally get **±90° of roll noise** (`face_up_roll_max`) — the built-in reverse curriculum, see the fix section below.
 
-| iter | debout | ventre | dos |
+**`ground_state_mix` curriculum** (easy → hard, the back last):
+
+| iter | standing | face-down | face-up |
 |---|---|---|---|
 | 0 | 0.50 | 0.50 | 0.00 |
 | 600 | 0.35 | 0.45 | 0.20 |
 | 1500 | 0.25 | 0.40 | 0.35 |
 | 2500 | 0.20 | 0.40 | 0.40 |
 
-## Récompenses
+## Rewards
 
-**Bloc de tâche**, aligné sur la recette évoluée du `standup` (poids à 1/4 de la version
-initiale ; les ratios internes et tous les `std` sont inchangés) :
+**Task block**, aligned on the evolved `standup` recipe (weights at 1/4 of the initial
+version; the internal ratios and all the `std` values are unchanged):
 
-| reward | poids | |
+| reward | weight | |
 |---|---|---|
-| `height_stand_l1` | **7.5** | doit dominer le bloc — c'est lui qui rend « rester au sol » net négatif |
-| `standing_composite` | 3.75 | score multiplicatif hauteur × droit × pose |
-| `pose_stand_legs` | 2.0 | pose cible = HOME (std 0.5) |
-| `upright_linear` / `upright_sharp` | 1.5 / 1.5 | `upright_sharp` gatée en hauteur, std 0.3 |
-| `pose_stand_l1` | 1.25 | bootstrap L1 |
-| `height_stand` / `height_stand_sharp` | 1.0 / 1.0 | std 0.04 (large) et 0.015 (serrée) |
-| `com_upward_velocity` | 0.75 | paye la montée, coupée à `ROLLER_STAND_Z + 0.010` |
-| `gentle_rise` | **+0.005** | poids POSITIF (voir bug de signe plus bas) ; 0.005 = plafond mesuré |
+| `height_stand_l1` | **7.5** | must dominate the block — it is what makes "stay on the ground" net negative |
+| `standing_composite` | 3.75 | multiplicative height × upright × pose score, **support-gated** |
+| `pose_stand_legs` | 2.0 | target pose = HOME (std 0.5), **support-gated** |
+| `upright_linear` / `upright_sharp` | 1.5 / 1.5 | `upright_sharp` height-gated, std 0.3 |
+| `pose_stand_l1` | 1.25 | L1 bootstrap |
+| `height_stand` / `height_stand_sharp` | 1.0 / 1.0 | std 0.04 (wide) and 0.015 (tight) |
+| `com_upward_velocity` | 0.75 | pays for the rise, cut off at `ROLLER_STAND_Z + 0.010` |
+| `gentle_rise` | **+0.005** | POSITIVE weight (see the sign bug below); 0.005 = measured ceiling |
 
-**Anti-violence, introduits seulement à l'itération 3000** (voir la leçon de timing plus bas) :
-`arrival_damping` (0 → −0.025 → −0.05) et `joint_torque_rate_l2` (0 → −1e-3).
+**Anti-violence, introduced only at iteration 3000** (see the timing lesson below):
+`arrival_damping` (0 → −0.025 → −0.05) and `joint_torque_rate_l2` (0 → −1e-3).
 
-Régularisateurs hérités : `body_ang_vel` **−0.05** (bloqueur de mouvement, à garder LÉGER),
-`angular_momentum` −0.02, `action_rate_l2` (base −0.1, rampe douce jusqu'à −1.0 **à 1500**),
-`neck_action_rate_l2` −0.5, `neck_joint_pos_l2` −0.5 (tête droite), `joint_torques_l2` −1e-3,
+Inherited regularisers: `body_ang_vel` **−0.05** (motion-blocker, keep it LIGHT),
+`angular_momentum` −0.02, `action_rate_l2` (base −0.1, gentle ramp to −1.0 **at 1500**),
+`neck_joint_pos_l2` −0.5 (head upright), `joint_torques_l2` −1e-3,
 `action_over_limit` −0.5, `self_collisions` −1.0.
 
-Retirées : toutes les récompenses de patinage, plus `feet_flat` (les lames ne sont pas à plat pendant la montée) et `hip_roll_neutral` (se relever demande d'écarter les jambes).
+Dropped: every skating reward, plus `feet_flat` (the blades are not flat during the rise), `hip_roll_neutral` (getting up requires spreading the legs), and `neck_action_rate_l2` (attempt tax, see the fix section).
 
-## ⚠️ Le point dur : les roues roulent
+## The rolling-friction curriculum
 
-Aucune adhérence longitudinale pour pousser sur le sol. Le **curriculum de friction de roulement est INVERSÉ** (l'env roller la fait monter, ici elle descend) :
+The wheels roll, so there is no longitudinal grip to push against the floor. The **rolling-friction curriculum is INVERTED** (the roller env ramps it up, here it comes down):
 
 | iter | frictionloss | |
 |---|---|---|
-| 0 | 0.05 | roues quasi bloquées → se relève comme avec des pieds |
+| 0 | 0.05 | wheels nearly locked → the standup works like it would on feet |
 | 1000 | 0.02 | |
 | 2000 | 0.008 | |
 | 3000 | 0.003 | |
-| 4000 | 0.0015 | la vraie valeur du roulement |
+| 4000 | 0.0015 | the real rolling value |
 
-**Surveiller `Episode_Reward/standing_composite` aux paliers.** S'il s'écroule, le geste « pieds adhérents » ne transfère pas aux roues libres → il faudra guider une technique de patineur (appui genou intermédiaire, un patin à la fois). C'est un résultat, pas un échec.
+⚠️ **Run fmt83tri measured this curriculum to be a NON-EVENT** — see the results section below. The founding hypothesis of this env is refuted.
 
-**Surveiller AUSSI la dérive horizontale du robot en play**, à chaque palier de friction. `standing_composite` ne voit ni `root_link_pos_w[:2]` ni la vitesse horizontale : une policy qui se relève en glissant loin de son point de départ collecte exactement le même score qu'une qui se relève et s'arrête. Tant que cette dérive n'a pas été mesurée visuellement, le résultat du curriculum de friction (la question même que cet env existe pour trancher) n'est pas fiable.
+**Sim2real**: only checkpoints after iter 4000 are deployment candidates. Before that, the policy leans on a friction that does not exist on the real robot.
 
-**Sim2real** : seuls les checkpoints d'après iter 4000 sont candidats au déploiement. Avant, la policy s'appuie sur une friction qui n'existe pas sur le vrai robot.
+## Command
 
-## Commande
+`twist` slot neutralised: `lin_vel_x`/`lin_vel_y` ±0.01, `ang_vel_z` **±0.05** (5× wider — same
+choice as `standup`). `head_pose` / `body_pose` slots **zero-padded** (roller convention). Target deployment: `--standing` alongside the roller policy in `--walking`, with the automatic switch on command magnitude (`infer_policy.py:262`, threshold 0.05); the twist slot is left at zero there (`infer_policy.py:239`).
 
-Slot `twist` neutralisé : `lin_vel_x`/`lin_vel_y` ± 0.01, `ang_vel_z` **± 0.05** (5× plus large — même
-choix que le `standup`). Slots `head_pose` / `body_pose` **zero-paddés** (convention roller). Déploiement visé : en `--standing` face à la policy roller en `--walking`, avec la bascule automatique sur la magnitude de la commande (`infer_policy.py:262`, seuil 0.05) ; le slot twist y est laissé à zéro (`infer_policy.py:239`).
+**Caveat**: `infer_policy.py` is the local sim/keyboard script. The robot runtime is the Rust `microduck_runtime` binary, absent from this repo — it has not been verified that it exposes a `--standing` equivalent. The crouch handoff doc only lists `--model`, `--ground-pick`, `--fold-policy`. To be confirmed.
 
-**Réserve** : `infer_policy.py` est le script de sim/clavier local. Le runtime robot est le binaire Rust `microduck_runtime`, absent du repo — il n'est pas vérifié qu'il expose un équivalent `--standing`. Le doc de passation du crouch ne liste que `--model`, `--ground-pick`, `--fold-policy`. À confirmer.
+## Backlash variant
 
-## Variante backlash
-
-`Mjlab-RollerStandUp-Flat-Backlash-MicroDuck` — ±1° de jeu d'engrenage en série par servo,
-avec le PD firmware qui boucle sur l'encodeur **à travers** le jeu, comme le vrai servo dont
-l'encodeur est en sortie de réducteur. Modèle `MICRODUCK_ROLLERS_BACKLASH_ROBOT_CFG`
-(roues + backlash, 32 joints dont 18 passifs). Obs et actions restent à 14 joints, donc
-runtime et export sont inchangés.
+`Mjlab-RollerStandUp-Flat-Backlash-MicroDuck` — ±1° of gear play in series per servo,
+with the firmware PD closing on the encoder **through** the play, like the real servo whose
+encoder sits on the gearbox output. Model `MICRODUCK_ROLLERS_BACKLASH_ROBOT_CFG`
+(wheels + backlash, 32 joints of which 18 passive). Obs and actions stay at 14 joints, so
+runtime and export are unchanged.
 
 ```bash
 uv run train Mjlab-RollerStandUp-Flat-Backlash-MicroDuck --env.scene.num-envs 4096 --agent.max_iterations 15000
 ```
 
-Récompenses, poids, reset au sol et curricula sont **identiques** à la tâche de base
-(vérifié par `test_backlash_variant_keeps_the_recovery_recipe`) : seuls le modèle et la
-lecture des joints changent.
+Rewards, weights, ground reset and curricula are **identical** to the base task
+(checked by `test_backlash_variant_keeps_the_recovery_recipe`): only the model and how joints
+are read change.
 
-⚠️ Cette variante n'est **sûre que depuis le passage aux indices servo-only**. Avec les
-anciens indices écrits contre le tableau complet, elle aurait silencieusement récompensé des
-roues et des charnières de jeu, sans planter.
+⚠️ This variant is **only safe since the move to servo-only indices**. With the old indices
+written against the full array, it would have silently rewarded wheels and backlash hinges,
+without crashing.
 
-**Pourquoi elle vaut le détour ici** : le relevé pousse sur le sol avec des servos souples, et
-le jeu d'engrenage est exactement le type d'écart sim2real qui fait échouer en vrai ce qui
-passe en simu — le symptôme observé sur le dos. À comparer avec la tâche de base pour trancher.
+**Why it is worth the detour here**: the standup pushes against the floor with compliant
+servos, and gear play is exactly the kind of sim2real gap that makes something passing in sim
+fail for real — the symptom observed on the back. Compare against the base task to settle it.
 
-## Terminaisons
+## Terminations
 
-`fell_over` **supprimée** (le robot démarre tombé). `nan_state` héritée. `nan_policy="sanitize"` sur les obs actor/critic.
+`fell_over` **removed** (the robot starts fallen). `nan_state` inherited. `nan_policy="sanitize"` on the actor/critic obs.
 
-## Réseau / PPO
+## Network / PPO
 
-Actor et critic `(512, 256, 128)` elu, `obs_normalization=True`. PPO `lr=1e-3` adaptive, `desired_kl=0.01`, `gamma=0.99`, `lam=0.95`, `num_steps_per_env=24`, épisode 6 s, `max_iterations=15000`. **Symétrie OFF** (`SYMMETRY_CFG` est câblé pour le layout 51D).
+Actor and critic `(512, 256, 128)` elu, `obs_normalization=True`. PPO `lr=1e-3` adaptive, `desired_kl=0.01`, `gamma=0.99`, `lam=0.95`, `num_steps_per_env=24`, 6 s episode, `max_iterations=15000`. **Symmetry OFF** (`SYMMETRY_CFG` is wired for the 51D layout).
 
-## Commandes
+## Commands
 
 ```bash
-uv run train Mjlab-RollerStandUp-Flat-MicroDuck --env.scene.num-envs 4096 --agent.max_iterations 15000
+uv run train Mjlab-RollerStandUp-Flat-MicroDuck --env.scene.num-envs 4096 --agent.max_iterations 6000
 uv run scripts/play_latest.py        # alias md-play
-uv run scripts/export_latest.py      # alias md-export
-uv run --with pytest pytest tests/test_roller_standup_cfg.py -q
+uv run --with pytest pytest tests/test_roller_standup_cfg.py tests/test_wheel_support_gate.py -q
 ```
 
-### ⚠️ Voir les départs sur le dos au play
+### ⚠️ Seeing back starts at play time
 
-Un play ne montre **jamais** de départ sur le dos par défaut : l'env de play est
-reconstruit à neuf, donc `common_step_counter` repart à 0 et le curriculum applique son
-palier 0, où `face_up_prob = 0`. On ne voit que 50 % ventre / 50 % debout, quelle que soit
-la maturité du checkpoint chargé. Or le dos est le cas le plus dur, celui qu'on veut
-justement inspecter.
+A play **never** shows a back start by default: the play env is rebuilt from scratch, so
+`common_step_counter` restarts at 0 and the curriculum applies its stage 0, where
+`face_up_prob = 0`. You only ever see 50 % face-down / 50 % standing, whatever the maturity
+of the loaded checkpoint. Yet the back is the hardest case, the one worth inspecting.
 
-`STANDUP_PLAY_FACE_UP` force le mélange (même motif que `SLOPE_PLAY_DIFFICULTY` dans
-`roller_slope`), **uniquement sur le chemin `play=True`** — l'entraînement et son
-curriculum easy → hard sont intouchés :
+`STANDUP_PLAY_FACE_UP` forces the mix (same pattern as `SLOPE_PLAY_DIFFICULTY` in
+`roller_slope`), **on the `play=True` path only** — training and its easy → hard curriculum
+are untouched:
 
 ```bash
-STANDUP_PLAY_FACE_UP=1.0 md-play    # 100 % de départs sur le dos
-STANDUP_PLAY_FACE_UP=0.4 md-play    # le mélange du dernier palier du curriculum
-STANDUP_PLAY_FACE_UP=none md-play   # défaut (palier 0, pas de dos)
+STANDUP_PLAY_FACE_UP=1.0 md-play    # 100 % back starts
+STANDUP_PLAY_FACE_UP=0.4 md-play    # the final curriculum stage's mix
+STANDUP_PLAY_FACE_UP=none md-play   # default (stage 0, no back start)
 ```
 
-Le reste (`1 - face_up`) est réparti ventre:debout dans le rapport 2:1 du dernier palier,
-si bien que `0.4` reproduit exactement le mélange de fin d'entraînement (0.40 / 0.20 / 0.40).
+The remainder (`1 - face_up`) is split face-down:standing in the last stage's 2:1 ratio, so
+`0.4` reproduces the end-of-training mix exactly (0.40 / 0.20 / 0.40).
 
-## 🔧 Historique des échecs et de la resynchronisation
+⚠️ `num_envs` defaults to **1**, so a single duck shows one pose at a time (redrawn every
+6 s). Pass `--num-envs 15` to see the mix side by side: at 0.4 that is 6 back / 6 face-down /
+3 standing.
 
-### Bug de signe : `gentle_rise` récompensait la violence
+## 🔧 History of failures and of the resynchronisation
 
-**Symptômes** (checkpoint 4000+) : mouvements très brusques, la tête tape le sol,
-échec du relevé depuis le dos. **Présents en simu aussi** → ni sim2real, ni checkpoint jeune.
+### Sign bug: `gentle_rise` was rewarding violence
 
-`trunk_vertical_accel_penalty` renvoie déjà `-|a_z|` (`mdp.py`) ; multiplié par le poids
-**−0.02** hérité du `standup`, ça donnait `+0.02·|a_z|` — **plus le tronc accélérait
-brutalement, plus la policy était payée**. Confirmé : `Episode_Reward/gentle_rise = +0.0118`
-sur le run `vweolw91`, seul terme de pénalité loggé positif.
+**Symptoms** (checkpoint 4000+): very abrupt motion, the head banging the floor,
+back recovery failing. **Present in sim too** → neither sim2real nor a young checkpoint.
 
-`mdp.py` mélange deux conventions de signe :
+`trunk_vertical_accel_penalty` already returns `-|a_z|` (`mdp.py`); multiplied by the
+**−0.02** weight inherited from `standup`, that gave `+0.02·|a_z|` — **the more brutally the
+trunk accelerated, the more the policy was paid**. Confirmed: `Episode_Reward/gentle_rise = +0.0118`
+on run `vweolw91`, the only penalty term logging positive.
 
-| terme | la fonction renvoie | poids correct |
+`mdp.py` mixes two sign conventions:
+
+| term | what the function returns | correct weight |
 |---|---|---|
-| `height_stand_l1`, `pose_stand_l1`, `gentle_rise` | `-abs(...)`, déjà négatif | **positif** |
-| `joint_torques_l2`, `joint_torque_rate_l2`, `action_rate_l2`, `body_impact_cost` | magnitude positive | **négatif** |
+| `height_stand_l1`, `pose_stand_l1`, `gentle_rise` | `-abs(...)`, already negative | **positive** |
+| `joint_torques_l2`, `joint_torque_rate_l2`, `action_rate_l2`, `body_impact_cost` | positive magnitude | **negative** |
 
-Verrouillé par `test_already_negative_penalties_use_positive_weights`. Le même bug existait
-dans `standup` et `sitstand` (run `7ev90yd9`) ; **les deux ont été corrigés depuis**.
+Locked by `test_already_negative_penalties_use_positive_weights`. The same bug existed
+in `standup` and `sitstand` (run `7ev90yd9`); **both have been fixed since**.
 
-### Échec n°1 : pénalité d'impact tête → policy gelée
+### Failure #1: head-impact penalty → frozen policy
 
-Essayée avec les valeurs de `velstand` (−1.0, seuil 2.0) : **la policy a convergé vers rester
-couchée, inerte.** Mesuré (run `d8rnko6p`) : `head_impact_penalty` −1.01/pas, plus gros terme
-négatif, `standing_composite` effondré de +14.3 à +3.3.
+Tried with `velstand`'s values (−1.0, threshold 2.0): **the policy converged to lying down,
+inert.** Measured (run `d8rnko6p`): `head_impact_penalty` −1.01/step, the largest negative
+term, `standing_composite` collapsed from +14.3 to +3.3.
 
-**L'optimum paresseux qui rend ce gel possible** : `pose_stand_legs` restait à **+7.72 sur 8**
-alors que le robot était allongé — les jambes sont à HOME en position couchée, donc la
-récompense est encaissée quasi gratuitement. `height_stand_l1` est le terme qui contrebalance
-ça (verrouillé par `test_height_l1_stays_the_dominant_task_term`).
+**The lazy optimum that makes such a freeze possible**: `pose_stand_legs` stayed at **+7.72 of 8**
+while the robot was lying flat — the legs sit at HOME in a lying pose, so the reward is
+collected almost for free. `height_stand_l1` is the term that counterbalances that (locked by
+`test_height_l1_stays_the_dominant_task_term`), and the support gate now handles it directly.
 
-### La vraie leçon : c'est le TIMING, pas la magnitude
+### The real lesson: it is TIMING, not magnitude
 
-Le `standup` a établi la loi générale sur deux runs cassés : *« the same weights active from
-step 0 prevent the flips from ever being DISCOVERED (attempt-tax on exploration) »*, et
-*« the fix is timing, not magnitude »*. Toute taxe sur les tentatives pendant la phase de
-découverte fait gagner « ne rien faire ». Les deux ajouts de cet env (`head_impact_penalty`
-à −1.0 **et** `joint_torque_rate_l2` à −2.0) étaient actifs dès le pas 0.
+`standup` established the general law across two broken runs: *"the same weights active from
+step 0 prevent the flips from ever being DISCOVERED (attempt-tax on exploration)"*, and
+*"the fix is timing, not magnitude"*. Any tax on attempts during the discovery phase makes
+"do nothing" win. Both of this env's additions (`head_impact_penalty` at −1.0 **and**
+`joint_torque_rate_l2` at −2.0) were active from step 0.
 
-### État actuel — recette resynchronisée sur `standup`
+### Recipe resynchronised on `standup`
 
-| | avant | maintenant |
+| | before | now |
 |---|---|---|
-| bloc de tâche entier | poids ×4 | **÷4** (`standing_composite` 3.75, `pose_stand_legs` 2.0, `height_stand_l1` 7.5…) |
-| `gentle_rise` | −0.02 (récompense) | **+0.005** — plafond mesuré : 0.01 contribuait au gel |
+| whole task block | weights ×4 | **÷4** (`standing_composite` 3.75, `pose_stand_legs` 2.0, `height_stand_l1` 7.5…) |
+| `gentle_rise` | −0.02 (a reward) | **+0.005** — measured ceiling: 0.01 contributed to the freeze |
 | `com_upward_velocity` | 3.0 | **0.75** |
-| `arrival_damping` | absent | **`body_ang_vel_at_height`**, gaté hauteur+inclinaison, 0 → −0.025 à 3000 → −0.05 à 4000 |
-| `joint_torque_rate_l2` | −0.2 dès le pas 0 | **0** → −1e-3 à 3000 |
-| rampe `action_rate_l2` | −0.4 → −1.0 dès 500 | **−0.1 → −1.0 à 1500** |
-| `head_impact_penalty` | testé à −1.0 | **absent** |
+| `arrival_damping` | absent | **`body_ang_vel_at_height`**, height+tilt gated, 0 → −0.025 at 3000 → −0.05 at 4000 |
+| `joint_torque_rate_l2` | −0.2 from step 0 | **0** → −1e-3 at 3000 |
+| `action_rate_l2` ramp | −0.4 → −1.0 from 500 | **−0.1 → −1.0 at 1500** |
+| `head_impact_penalty` | tested at −1.0 | **absent** |
 
-Diviser la tâche plutôt que monter les amortisseurs corrige le rapport tâche/amortissement
-(mesuré à ~35:1, maintenant ~9:1) **sans** transformer un amortisseur en bloqueur de mouvement.
+Dividing the task rather than raising the dampers fixes the task/damper ratio
+(measured at ~35:1, now ~9:1) **without** turning a damper into a motion-blocker.
 
-`arrival_damping` vise la boucle d'échec réelle — monter → dépasser la verticale → basculer →
-recommencer. Ses portes de hauteur sont transposées sur `ROLLER_STAND_Z` (0.113 / 0.133) et
-**pas** copiées du marcheur (0.09 / 0.11), qui ouvriraient la porte alors que le robot roller
-est encore 3 cm sous sa station, donc en pleine montée. La porte d'inclinaison est
-indispensable : sans elle, le redressement final d'une montée pliée est lui-même une grande
-rotation, et la taxer dresse un mur juste avant l'arrivée.
+`arrival_damping` targets the real failure loop — rise → overshoot vertical → tip → retry.
+Its height gates are transposed onto `ROLLER_STAND_Z` (0.113 / 0.133) and **not** copied from
+the walker (0.09 / 0.11), which would open the gate while the roller robot is still 3 cm below
+its stand, i.e. mid-rise. The tilt gate is essential: without it, the final straightening of a
+folded rise is itself a large rotation, and taxing it raises a wall just before arrival.
 
-⚠️ **Si le relevé se dégrade après 3000, adoucir le DERNIER palier — ne pas avancer
-l'introduction.**
+⚠️ **If the standup degrades after 3000, soften the LAST stage — do not move the introduction
+earlier.**
 
-### 🐛 Régression : indices de joints hors bornes
+### 🐛 Regression: out-of-bounds joint indices
 
-La migration de `mdp.py` vers `_servo_joint_pos` a rendu l'env **inentraînable** sans que rien
-ne le signale. `joint_indices` s'interprète désormais dans la vue **servo-only à 14 joints**
-(`^(?!passive_).*`, donc sans roues ni backlash) ; les constantes visaient le tableau complet à
-18 joints, donc les indices 14 et 15 sortaient des bornes → `index out of bounds` sur GPU.
+The `mdp.py` migration to `_servo_joint_pos` made the env **untrainable** with nothing
+signalling it. `joint_indices` is now interpreted in the **14-joint servo-only view**
+(`^(?!passive_).*`, so without wheels or backlash); the constants targeted the 18-joint full
+array, so indices 14 and 15 fell out of bounds → `index out of bounds` on GPU.
 
-**Les 37 tests de config passaient quand même** : ils construisent `cfg` sans jamais appeler
-les récompenses. Seul un vrai run le révèle — c'est la limite structurelle de ces tests, et il
-faut lancer 3 itérations réelles après tout changement d'indices ou de capteur.
+**The 37 config tests passed anyway**: they build `cfg` without ever calling the rewards.
+Only a real run reveals it — that is the structural limit of those tests, and 3 real
+iterations must be launched after any index or sensor change.
 
-Bénéfice : la vue servo-only est **identique** sur le modèle rollers et sur rollers+backlash
-(32 joints dont 18 passifs), donc les indices sont maintenant robustes au backlash — vérifié
-sur les deux modèles par `test_joint_indices_are_in_the_canonical_servo_space`.
+Benefit: the servo-only view is **identical** on the rollers model and on rollers+backlash
+(32 joints, 18 passive), so the indices are now backlash-proof — checked on both models by
+`test_joint_indices_are_in_the_canonical_servo_space`.
 
-### Leçon de méthode
+### Method lesson
 
-Les trois premières corrections ont été appliquées d'un coup, donc le gel n'a pas pu être
-attribué avec certitude. Une correction à la fois.
+The first three fixes were applied at once, so the freeze could not be attributed with
+certainty. One fix at a time.
 
-## Hors périmètre
+## Out of scope
 
-Intégrer le relevé dans la policy de roulage (recette `velstand`) ; buckets de départ sur le côté ; variante rough ; pénalités d'impact tronc/tête.
+Folding the standup into the skating policy (`velstand` recipe); side-start buckets; a rough variant; trunk/head impact penalties.
 
-Aucune récompense ne pénalise la vitesse horizontale du tronc (`root_link_lin_vel_w[:, :2]`) : « se relever en roulant loin » est un résultat non pénalisé et qui score à plein. Décision volontaire (pas un oubli) : une récompense d'immobilité qui ne serait pas gatée en hauteur pénaliserait aussi la translation que le relevé depuis le sol exige physiquement — le mode d'échec « bloqueur de mouvement » que le `standup` documente. Candidat si le problème se confirme : une immobilité gatée en hauteur (proche de `ROLLER_STAND_Z` seulement).
+No reward penalises horizontal trunk velocity (`root_link_lin_vel_w[:, :2]`): "getting up while rolling far away" is an unpenalised outcome that scores in full. A deliberate decision (not an oversight): a stillness reward that was not height-gated would also penalise the translation that getting up from the ground physically requires — the "motion-blocker" failure mode `standup` documents. Candidate if the problem is confirmed: a height-gated stillness (near `ROLLER_STAND_Z` only).
 
 ---
 
-## 🔴 Run `fmt83tri` — le trépied sur la tête, et ce que le portage avait perdu
+## 🔴 Run `fmt83tri` — the head tripod, and what the port had lost
 
-Premier run de la recette resynchronisée (4096 envs, 6000 it.). **Échec, diagnostiqué.**
+First run of the resynchronised recipe (4096 envs, 6000 iters). **Failed, diagnosed.**
 
-### Ce que la policy faisait
+### What the policy was doing
 
-Un **trépied sur la tête** : tête plantée au sol, tronc levé à la hauteur de station
-avec ~55° d'inclinaison, jambes laissées à HOME. Vérifié à l'œil sur `model_500` comme sur
-`model_3500` — **il n'y a jamais eu de relevé**, à aucun stade.
+A **head tripod**: head planted on the floor, trunk levered up to standing height at ~55° of
+tilt, legs left at HOME. Confirmed by eye on `model_500` as well as `model_3500` — **there was
+never a standup**, at any stage.
 
-Pourquoi ça payait, mesuré par pas à l'itération 3625 :
+Why it paid, measured per step at iteration 3625:
 
-| terme | valeur | max | % |
+| term | value | max | % |
 |---|---|---|---|
-| `pose_stand_legs` | 1.991 | 2.00 | **99.5 %** (plat depuis l'iter 250) |
+| `pose_stand_legs` | 1.991 | 2.00 | **99.5 %** (flat since iter 250) |
 | `height_stand_sharp` | 0.505 | 1.00 | 50 % |
 | `upright_linear` | 0.852 | 1.50 | 57 % → cos(tilt) 0.57 → **55°** |
 | `standing_composite` | 0.915 | 3.75 | 24 % |
-| **total positif** | **5.16** | **10.75** | **48 %** |
+| **total positive** | **5.16** | **10.75** | **48 %** |
 
-Garder 48 % du stack sans jamais se relever = l'audit d'AGENTS.md qui échoue. Le composite
-multiplicatif s'effondrait bien sur la verticalité, mais il ne pèse que 3.75 d'une masse
-positive de 10.75 : **un score multiplicatif ne casse pas un compromis que le reste de la
-pile finance.**
+Keeping 48 % of the stack without ever standing up = AGENTS.md's audit failing. The
+multiplicative composite did collapse on the uprightness factor, but it only weighs 3.75 of a
+10.75 positive mass: **a multiplicative score does not break a compromise that the rest of the
+stack finances.**
 
-### Le tell dans les courbes
+### The tell in the curves
 
-`standing_composite / max` suivait `standing_prob` à +0.05 près, à tous les paliers
-(0.50→0.59, 0.35→0.40, 0.25→0.27, 0.20→0.24). Autrement dit **toute la récompense de station
-venait des envs spawnés déjà debout**. Les trois « décrochages » à 625 / 1625 / 2625 n'étaient
-pas une compétence qui se dégrade : c'était le seul bucket payant qui rétrécissait.
+`standing_composite / max` tracked `standing_prob` to within +0.05 at every stage
+(0.50→0.59, 0.35→0.40, 0.25→0.27, 0.20→0.24). In other words **all the standing reward came
+from envs spawned already standing**. The three "drops" at 625 / 1625 / 2625 were not a skill
+degrading: they were the only paying bucket shrinking.
 
-⚠️ Le `standup` du marcheur décrit **exactement cette signature** pour ses deux runs cassés de
-2026-07-24 : *« standing metrics drop at the ground_state_mix stages instead of recovering like
-the reference run »*. Cet env avait reproduit les runs cassés du marcheur, pas celui qui marche.
+⚠️ The walker `standup` describes **exactly this signature** for its two broken runs of
+2026-07-24: *"standing metrics drop at the ground_state_mix stages instead of recovering like
+the reference run"*. This env had reproduced the walker's broken runs, not its working one.
 
-### Correctif 1 — porte d'appui (`wheel_support_gate`)
+### Fix 1 — support gate (`wheel_support_gate`)
 
-`standing_composite` et `pose_stand_legs` passent par leurs variantes `*_on_wheels` :
-multipliées par une porte binaire qui vaut 1 **seulement si le robot est porté par ses roues
-seules** (un pneu suffit ; tête ou tronc au sol ferment). Une porte, pas une pénalité : une
-pénalité se négocie (« la tête me coûte 1.0 mais me rapporte 2.9 »), zéro fois quelque chose
-ne se négocie pas.
+`standing_composite` and `pose_stand_legs` go through their `*_on_wheels` variants:
+multiplied by a binary gate that is 1 **only if the robot is carried by its wheels alone**
+(one tire is enough; head, trunk or limbs on the floor close it). A gate, not a penalty: a
+penalty gets negotiated ("the head costs me 1.0 but earns me 2.9"), zero times anything does
+not.
 
-**La mise en forme de la MONTÉE reste non gatée** (`height_stand`, `height_stand_l1`,
-`upright_linear`) — sinon plus rien ne tire le robot hors du sol. Verrouillé par
+**The CLIMB shaping stays ungated** (`height_stand`, `height_stand_l1`,
+`upright_linear`) — otherwise nothing pulls the robot off the floor any more. Locked by
 `test_climb_shaping_stays_ungated`.
 
-Nouveaux capteurs : `head_ground_contact` (`jaw_soft`) et `trunk_ground_contact`
-(`trunk_base`, **`mode="body"` et pas `"subtree"`** — le sous-arbre contient les pneus, la
-porte resterait fermée debout).
+New sensors: `head_ground_contact` (`jaw_soft`), `trunk_ground_contact`
+(`trunk_base`, **`mode="body"` and not `"subtree"`** — the subtree contains the tires, so the
+gate would stay closed while standing) and `limbs_ground_contact` (see the leak below).
 
-### Correctif 2 — `neck_action_rate_l2` retiré
+### Fix 2 — `neck_action_rate_l2` dropped
 
-Après la porte, la policy s'est **figée** depuis le ventre (observé à l'iter 500). Ce n'était
-pas une régression : la porte avait supprimé le trépied, seul comportement que la policy ait
-jamais trouvé, et il n'y avait rien d'autre à portée d'exploration.
+After the gate, the policy **froze** from face-down (observed at iter 500). That was not a
+regression: the gate had removed the tripod, the only behaviour the policy had ever found, and
+there was nothing else within exploration reach.
 
-Le calcul qu'elle faisait alors, depuis le ventre : **rester immobile ≈ −0.39/pas, bouger
-≈ −4.2/pas.** Ne rien faire gagnait d'un facteur 10.
+The arithmetic it then faced, from face-down: **stay still ≈ −0.39/step, move ≈ −4.2/step.**
+Doing nothing won by a factor of 10.
 
-`neck_action_rate_l2` (−0.5) en était le premier poste : mesuré **−1.359/pas**, plus gros terme
-de toute la récompense, ~1.9× le bloc de tâche positif. Il **double-taxe** les 4 joints de tête,
-déjà couverts par `action_rate_l2` (poids effectif 0.6 contre 0.1 par joint de jambe au palier 0).
-Il arrivait par héritage de la recette de **patinage** et n'avait jamais été audité pour un relevé.
-Le `standup` du marcheur le jette explicitement (`microduck_standup_env_cfg.py:485`).
+`neck_action_rate_l2` (−0.5) was the biggest item: measured **−1.359/step**, the largest term
+in the whole reward, ~1.9× the positive task block. It **double-taxes** the 4 head joints,
+already covered by `action_rate_l2` (effective weight 0.6 against 0.1 per leg joint at stage 0).
+It arrived by inheritance from the **skating** recipe and had never been audited for a standup.
+The walker `standup` drops it explicitly (`microduck_standup_env_cfg.py:485`).
 
-⚠️ **Les deux termes de cou tirent en sens opposés.** `neck_joint_pos_l2` (−0.5, tête loin du
-neutre) combat le trépied → **gardé**. `action_over_limit` (−0.5) est gardé aussi : il pénalise
-les commandes hors `ctrlrange`, pas le mouvement. Verrouillé par
+⚠️ **The two neck terms pull in opposite directions.** `neck_joint_pos_l2` (−0.5, head far from
+neutral) fights the tripod → **kept**. `action_over_limit` (−0.5) is kept too: it penalises
+commands outside `ctrlrange`, not motion. Locked by
 `test_neck_action_rate_is_dropped_but_neck_position_is_kept`.
 
-### Correctif 3 — `face_up_roll_max = 90°`
+### Fix 3 — `face_up_roll_max = 90°`
 
-**Le paramètre manquait**, donc il valait 0 : tous les départs sur le dos étaient parfaitement
-à plat. Or le marcheur documente ce cas comme sans issue — *« back-recovery was seed-lucky
-(1 success / 3 failures) because the reward landscape from flat supine to prone is FLAT »*.
+**The parameter was missing**, so it defaulted to 0: every back start was perfectly flat. Yet
+the walker documents that case as hopeless — *"back-recovery was seed-lucky
+(1 success / 3 failures) because the reward landscape from flat supine to prone is FLAT"*.
 
-Mesuré ici sur 256 spawns : **le tilt vaut 90.0° pour tous, quel que soit le roulis** — rouler
-autour de l'axe long ne change pas l'écart à la verticale, donc `upright_linear` reste à ≈ 0
-pendant tout le geste. Confirmation directe qu'aucun gradient ne guide le roulé.
+Measured here on 256 spawns: **tilt reads 90.0° for all of them, whatever the roll** — rolling
+about the long axis does not change the distance from vertical, so `upright_linear` stays at
+≈ 0 throughout the gesture. Direct confirmation that no gradient guides the roll.
 
-Le bruit de roulis fait démarrer une fraction des épisodes **à mi-roulé** : reverse curriculum
-intégré, sans palier à régler. Vérifié sans pénétration au spawn (0/256 sous le sol) ; chute
-médiane de 42 mm au reset, artefact connu du plancher `prone_z` partagé entre dos et ventre.
+The roll noise makes a fraction of episodes start **part-way through the roll**: a built-in
+reverse curriculum with no stage to tune. Verified with no spawn penetration (0/256 below the
+floor); 42 mm median drop at reset, a known artefact of the `prone_z` floor shared between
+back and belly.
 
-### ✅ Résultat mesuré : les roues ne sont PAS le point dur
+### ✅ Measured result: the wheels are NOT the hard part
 
-Aux trois paliers du curriculum de friction (1000 / 2000 / 3000, soit 0.05 → 0.003, un facteur
-17), `standing_composite` **ne baisse pas** — à 2000 et 3000 elle monte même juste après. Les
-deux curricula tombent sur des itérations différentes (600/1500/2500 contre 1000/2000/3000),
-donc l'attribution est propre.
+At all three stages of the friction curriculum (1000 / 2000 / 3000, i.e. 0.05 → 0.003, a
+factor of 17), `standing_composite` **does not drop** — at 2000 and 3000 it even rises just
+after. The two curricula land on different iterations (600/1500/2500 vs 1000/2000/3000), so
+the attribution is clean.
 
-**L'hypothèse fondatrice de cet env est infirmée.** Le geste ne bute pas sur l'absence
-d'adhérence longitudinale. Conséquence de calendrier : le curriculum de friction dépense
-4000 itérations sur un faux problème, et c'est lui qui repousse l'anti-violence à 3000.
-Candidat à compresser une fois le relevé acquis.
+**The founding hypothesis of this env is refuted.** The gesture is not blocked by the absence
+of longitudinal grip. Scheduling consequence: the friction curriculum spends 4000 iterations
+on a non-problem, and it is what pushes the anti-violence terms out to 3000. A compression
+candidate once the standup itself works.
 
-### 🐛 Fuite de la porte v1 — hanches et tibias
+### 🐛 The v1 gate's leak — hips and shins
 
-Premier run gaté : `pose_stand_legs / 1.9 = 0.67` alors que `standing_prob = 0.50`, lu à tort
-comme « un tiers des départs ventre se relèvent ». **La vidéo disait le contraire** : robot
-vautré, immobile.
+First gated run: `pose_stand_legs / 1.9 = 0.67` while `standing_prob = 0.50`, misread as
+"a third of the face-down starts get up". **The video said otherwise**: robot sprawled,
+motionless.
 
-Cause : le modèle rollers n'a que **12 géoms de collision** —
+Cause: the rollers model carries only **12 collision geoms** —
 
 ```
-trunk_base  np_f970 (batterie, à l'arrière)     hip_l, hip_l_2   hip
+trunk_base  np_f970 (battery, at the rear)      hip_l, hip_l_2   hip
 jaw_soft    top_head_shell, jaw, bottom_head    leg, leg_2       leg
 tire ×4
 ```
 
-**Les coques du tronc sont VISUELLES.** Un robot vautré reposant sur ses hanches et ses
-tibias, un pneu frôlant le sol et la tête relevée, ne déclenchait donc ni
-`head_ground_contact` ni `trunk_ground_contact` : la porte s'ouvrait à plat par terre.
+**The trunk shells are VISUAL-only.** A robot sprawled on its hips and shins, one tire grazing
+the floor and the head held up, therefore triggered neither `head_ground_contact` nor
+`trunk_ground_contact`: the gate opened while lying flat on the ground.
 
-Correctif : troisième capteur `limbs_ground_contact` (`^(hip_l|hip_l_2|leg|leg_2)$`). « Porte
-ouverte » signifie maintenant exactement **« seuls les pneus touchent le sol »**.
+Fix: a third sensor `limbs_ground_contact` (`^(hip_l|hip_l_2|leg|leg_2)$`). "Gate open" now
+means exactly **"only the tires touch the floor"**.
 
-Vérifié dans les DEUX sens, ce que le premier correctif n'avait pas fait :
+Verified in BOTH directions, which the first fix had not done:
 
-| | porte |
+| | gate |
 |---|---|
-| 128 envs debout sur roues, ctrl HOME, pas 0–25 | **0.99 → 1.00** (`limbs` jamais déclenché) |
-| les mêmes après bascule (pas 100, tête au sol) | 0.39 |
-| vautré hanches + tibias (test unitaire) | **0** |
+| 128 envs standing on wheels, HOME ctrl, steps 0–25 | **0.99 → 1.00** (`limbs` never triggered) |
+| the same after toppling (step 100, head down) | 0.39 |
+| sprawled on hips + shins (unit test) | **0** |
 
-Smoke : `pose_stand_legs` 0.0896 → 0.0288 sur policy aléatoire — la fuite valait 3×.
+Smoke: `pose_stand_legs` 0.0896 → 0.0288 on a random policy — the leak was worth 3×.
 
-⚠️ **Leçon de méthode.** Une porte par contacts se lit « telle partie ne touche pas », pas
-« le robot est debout ». Toute liste d'interdits incomplète est une fuite silencieuse qui
-*ressemble à un progrès dans les courbes*. Le contre-test obligatoire est double : la porte
-s'ouvre-t-elle debout, ET reste-t-elle fermée sur chaque vautrage stable ?
+⚠️ **Method lesson.** A contact-based gate reads "this part is not touching", not "the robot is
+standing". Any incomplete list of forbidden contacts is a silent leak that *looks like progress
+in the curves*. The mandatory counter-test is twofold: does the gate open while standing, AND
+does it stay closed on every stable sprawl?
 
-### Lecture des métriques — ce qui est fiable
+### Reading the metrics — what is trustworthy
 
-| jauge | calcul | ce que ça dit |
+| gauge | computation | what it says |
 |---|---|---|
-| `standing_composite / 3.75` **vs** `Curriculum/ground_state_mix` | ratio | **le test principal.** Le second logge `standing_prob`. Égalité = seuls les envs déjà debout marquent = aucun relevé |
-| `pose_stand_legs / 1.9` | ≈ fraction du temps porte ouverte | honnête **depuis le correctif de fuite seulement** |
-| `\|height_stand_l1\| / 7.5` | erreur de hauteur (m) | 32 mm sur le trépied, 4 mm quand ça tient |
-| `acos(upright_linear / 1.5)` | inclinaison du tronc | **55° = trépied**, 46° = calé sur les hanches, < 26° = debout |
+| `standing_composite / 3.75` **vs** `Curriculum/ground_state_mix` | ratio | **the main test.** The latter logs `standing_prob`. Equality = only the already-standing envs score = no standup at all |
+| `pose_stand_legs / 1.9` | ≈ fraction of time with the gate open | honest **only since the leak fix** |
+| `\|height_stand_l1\| / 7.5` | height error (m) | 32 mm on the tripod, 4 mm when it holds |
+| `acos(upright_linear / 1.5)` | trunk tilt | **55° = tripod**, 46° = propped on the hips, < 26° = standing |
 
-⚠️ `standing_composite` écrase par un facteur de verticalité d'écart-type 0.40 : à 32°
-d'inclinaison ce facteur vaut déjà 0.39. Un composite bas peut donc vouloir dire « penché »
-plutôt que « pas debout » — c'est `pose_stand_legs` (gaté) qui départage.
+⚠️ `standing_composite` crushes through an uprightness factor of std 0.40: at 32° of tilt that
+factor is already 0.39. A low composite can therefore mean "leaning" rather than "not
+standing" — `pose_stand_legs` (gated) is what settles it.
 
-### ✅ `ROLLER_STAND_Z = 0.138` — vérifié sous charge sur le modèle rollers
+### ✅ `ROLLER_STAND_Z = 0.138` — verified under load on the rollers model
 
-L'hypothèse non vérifiée était l'affaissement : `0.1407` venait bien d'une cinématique exacte
-sur `scene_rollers.xml`, mais le passage à `0.138` **empruntait** les ~2 mm d'affaissement
-mesurés sur le modèle SANS roues.
+The unverified assumption was the sag: `0.1407` did come from exact kinematics on
+`scene_rollers.xml`, but the step to `0.138` **borrowed** the ~2 mm of sag measured on the
+model WITHOUT wheels.
 
-Mesure directe (512 envs spawnés debout, ctrl HOME, DR coupée, envs à tilt < 5° seulement) :
+Direct measurement (512 envs spawned standing, HOME ctrl, DR off, envs at tilt < 5° only):
 
-| pas | envs droits | z médian | écart à 0.138 |
+| step | upright envs | median z | offset from 0.138 |
 |---|---|---|---|
 | 5 | 512 | 0.1393 | +1.3 mm |
 | 10 | 512 | 0.1388 | +0.8 mm |
 | 20 | 12 | 0.1386 | +0.6 mm |
 
-Affaissement réel : 0.1407 → 0.1386 = **2,1 mm**, contre 2,2 mm empruntés. L'emprunt était bon.
-`height_stand_sharp` ayant un std de 15 mm, une erreur de cible de 1 mm lui coûte 0,4 % — sans
-effet.
+Real sag: 0.1407 → 0.1386 = **2.1 mm**, against 2.2 mm borrowed. The borrow was right.
+`height_stand_sharp` having a 15 mm std, a 1 mm target error costs it 0.4 % — no effect.
 
-⚠️ **Effet de bord mesuré, plus important que la hauteur elle-même** : 512 envs droits au pas
-10, il n'en reste que **12 au pas 20**. Sans DR, sans bruit d'inclinaison, sans poussée. Debout
-sur quatre roues libres avec un PD vers HOME, le robot bascule en **0,4 s**.
+⚠️ **Measured side finding, more important than the height itself**: 512 envs upright at step
+10, only **12 left at step 20**. With no DR, no tilt noise, no push. Standing on four free
+wheels with a PD toward HOME, the robot topples in **0.4 s**.
 
-Le bucket « déjà debout » n'est donc PAS un ticket gratuit : tenir la station sur rollers est
-déjà un problème de contrôle actif. Conséquence pour la lecture des courbes : les envs spawnés
-debout ne marquent pas automatiquement `standing_prob`, ils ne marquent que s'ils tiennent —
-une partie de l'écart `standing_composite/3.75` vs `ground_state_mix` vient de là, pas
-seulement des envs au sol.
+The "already standing" bucket is therefore NOT a free ride: holding the stand on rollers is
+already an active control problem. Consequence for reading the curves: envs spawned standing do
+not automatically score `standing_prob`, they only score if they hold — part of the gap between
+`standing_composite/3.75` and `ground_state_mix` comes from that, not only from the ground envs.

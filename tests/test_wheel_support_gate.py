@@ -48,7 +48,7 @@ def _gate(contacts, num_envs=1):
 
 
 def test_wheels_only_opens_the_gate():
-    # Un pneu au sol, ni tête ni tronc : c'est la station sur roues.
+    # One tire on the floor, neither head nor trunk: that is standing on wheels.
     g = _gate(
         {
             "feet_ground_contact": [[1.0]],
@@ -60,7 +60,7 @@ def test_wheels_only_opens_the_gate():
 
 
 def test_head_tripod_scores_zero():
-    # LE mode d'échec : pneus au sol ET tête au sol -> aucune récompense d'état-but.
+    # THE failure mode: tires down AND head down -> no goal-state reward at all.
     g = _gate(
         {
             "feet_ground_contact": [[1.0]],
@@ -72,7 +72,7 @@ def test_head_tripod_scores_zero():
 
 
 def test_trunk_prop_scores_zero():
-    # Le hack suivant si on ne gatait que la tête : s'appuyer sur la batterie.
+    # The next hack if only the head were gated: prop up on the battery.
     g = _gate(
         {
             "feet_ground_contact": [[1.0]],
@@ -84,7 +84,7 @@ def test_trunk_prop_scores_zero():
 
 
 def test_airborne_scores_zero():
-    # Aucun appui : pas de station, donc pas de paiement (anti-ballistique).
+    # No support at all: not a stand, so no payout (anti-ballistic).
     g = _gate(
         {
             "feet_ground_contact": [[0.0]],
@@ -96,10 +96,10 @@ def test_airborne_scores_zero():
 
 
 def test_any_wheel_counts_not_all():
-    """Un seul slot en contact suffit.
+    """A single slot in contact is enough.
 
-    Exiger les deux pieds ferait de la porte un fil du rasoir qui se coupe au
-    moindre instant d'appui unilatéral — un robot debout sur roues en a.
+    Requiring both feet would make the gate a knife edge that cuts out at the
+    slightest single-support moment — a robot standing on wheels has those.
     """
     g = _gate(
         {
@@ -114,7 +114,7 @@ def test_any_wheel_counts_not_all():
 def test_gate_is_per_env():
     g = _gate(
         {
-            # env0 : debout sur roues. env1 : trépied. env2 : à plat sur le tronc.
+            # env0: standing on wheels. env1: tripod. env2: flat on the trunk.
             "feet_ground_contact": [[1.0], [1.0], [1.0]],
             "head_ground_contact": [[0.0], [1.0], [0.0]],
             "trunk_ground_contact": [[0.0], [0.0], [1.0]],
@@ -125,23 +125,23 @@ def test_gate_is_per_env():
 
 
 def test_missing_sensors_degrade_to_all_ones():
-    """Un env qui ne déclare aucun de ces capteurs n'est pas neutralisé.
+    """An env declaring none of these sensors must not be neutralised.
 
-    Les variantes gatées ont des noms de capteurs par défaut ; si un autre env
-    les appelait sans déclarer les capteurs, une porte fermée par défaut
-    annulerait silencieusement ses récompenses. Elle s'ouvre donc.
+    The gated variants carry default sensor names; if another env called them
+    without declaring the sensors, a default-closed gate would silently zero its
+    rewards. So it opens instead.
     """
     g = _gate({}, num_envs=2)
     assert g.tolist() == [1.0, 1.0]
 
 
 def test_gated_variants_multiply_the_base_reward():
-    """La variante gatée = terme de base × porte, sans autre changement.
+    """The gated variant = base term x gate, with nothing else changed.
 
-    Vérifié en montant une porte fermée et une porte ouverte sur les MÊMES
-    données : le rapport doit être exactement 0 et l'identité.
+    Checked by building a closed gate and an open gate over the SAME data: the
+    ratio must be exactly 0 and the identity.
     """
-    # Porte fermée par la tête -> 0 ; porte ouverte -> valeur de base inchangée.
+    # Gate closed by the head -> 0; gate open -> base value unchanged.
     closed = _gate(
         {"feet_ground_contact": [[1.0]], "head_ground_contact": [[1.0]]}
     )
@@ -152,15 +152,15 @@ def test_gated_variants_multiply_the_base_reward():
     assert opened.tolist() == [1.0]
 
 
-# ── Le trou de la porte v1 : hanches et tibias ───────────────────────────────
-# Mesuré sur le premier run gaté. Le modèle rollers n'a que 12 géoms de
-# collision : np_f970 (batterie) sur trunk_base, 3 géoms de tête sur jaw_soft,
-# hip_l/hip_l_2, leg/leg_2, et les 4 pneus. Les coques du tronc sont VISUELLES.
-# Un robot vautré reposant sur ses hanches et ses tibias, un pneu frôlant le sol
-# et la tête relevée, ne déclenchait donc NI head_ground_contact NI
-# trunk_ground_contact : la porte s'ouvrait à plat par terre et pose_stand_legs
-# payait. Symptôme : pose_stand_legs/1.9 = 0.67 alors que standing_prob = 0.50,
-# lu à tort comme « un tiers des départs ventre se relèvent ».
+# ── The v1 gate's hole: hips and shins ───────────────────────────────────────
+# Measured on the first gated run. The rollers model carries only 12 COLLISION
+# geoms: np_f970 (battery) on trunk_base, 3 head geoms on jaw_soft,
+# hip_l/hip_l_2, leg/leg_2, and the 4 tires. The trunk shells are VISUAL-only.
+# So a robot sprawled on its hips and shins, one tire grazing the floor and the
+# head held up, triggered NEITHER head_ground_contact NOR trunk_ground_contact:
+# the gate opened while lying flat and pose_stand_legs paid. Symptom:
+# pose_stand_legs/1.9 = 0.67 while standing_prob = 0.50, misread as "a third of
+# the face-down starts get up".
 
 
 def test_sprawl_on_hips_and_shins_scores_zero():
@@ -176,7 +176,7 @@ def test_sprawl_on_hips_and_shins_scores_zero():
 
 
 def test_limbs_sensor_is_in_the_default_forbidden_set():
-    """Le défaut doit inclure les trois, sinon un env qui l'omet refuit."""
+    """The default must include all three, else an env omitting it leaks again."""
     assert mdp._WHEEL_SUPPORT_FORBIDDEN_SENSORS == (
         "head_ground_contact",
         "trunk_ground_contact",
@@ -185,10 +185,10 @@ def test_limbs_sensor_is_in_the_default_forbidden_set():
 
 
 def test_only_wheels_touching_still_opens():
-    """La porte doit rester OUVRABLE : debout, seuls les pneus touchent.
+    """The gate must stay OPENABLE: standing, only the tires touch.
 
-    Le risque symétrique du correctif : trop d'interdits et la porte ne s'ouvre
-    plus jamais, ce qui annule silencieusement les récompenses d'état-but.
+    The symmetric risk of the fix: too many forbidden contacts and the gate never
+    opens again, silently zeroing the goal-state rewards.
     """
     g = _gate(
         {
