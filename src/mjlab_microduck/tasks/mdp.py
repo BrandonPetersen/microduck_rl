@@ -786,8 +786,14 @@ def servo_acc_spike_penalty(
     return torch.clamp(acc.abs() - acc_thresh, min=0.0).sum(dim=1)
 
 
-def _fallen_scale(env: ManagerBasedRlEnv, asset: Entity, fallen_scale: float, gate_tilt_above_deg: float) -> torch.Tensor:
+def _fallen_scale(env: ManagerBasedRlEnv, asset: Entity, fallen_scale: float, gate_tilt_above_deg: float, also_when_handled: bool = False) -> torch.Tensor:
+    """``fallen_scale`` while fallen (and, if ``also_when_handled``, while held by
+    the virtual hand — issue #47 bisection: the unscaled action_rate on a held,
+    flailing robot was -12/step for 30 % of frames, value loss 0.5 → 20, and the
+    run collapsed; the bounded handled_* costs price the flailing instead)."""
     fallen = _fallen_mask(env, asset, 0.0, gate_tilt_above_deg).bool()
+    if also_when_handled:
+        fallen = fallen | handled_mask(env)
     return torch.where(fallen, torch.full_like(fallen, fallen_scale, dtype=torch.float), torch.ones(fallen.shape, device=env.device))
 
 
@@ -796,6 +802,7 @@ def action_rate_l2_fallen_scaled(
     fallen_scale: float = 0.1,
     gate_tilt_above_deg: float = 40.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    also_when_handled: bool = False,
 ) -> torch.Tensor:
     """mjlab action_rate_l2, multiplied by ``fallen_scale`` while tilt > gate.
 
@@ -809,7 +816,7 @@ def action_rate_l2_fallen_scaled(
     """
     asset: Entity = env.scene[asset_cfg.name]
     base = torch.sum(torch.square(env.action_manager.action - env.action_manager.prev_action), dim=1)
-    return base * _fallen_scale(env, asset, fallen_scale, gate_tilt_above_deg)
+    return base * _fallen_scale(env, asset, fallen_scale, gate_tilt_above_deg, also_when_handled)
 
 
 def joint_torque_rate_l2_fallen_scaled(
@@ -817,10 +824,11 @@ def joint_torque_rate_l2_fallen_scaled(
     fallen_scale: float = 0.1,
     gate_tilt_above_deg: float = 40.0,
     asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    also_when_handled: bool = False,
 ) -> torch.Tensor:
     """joint_torque_rate_l2 × ``fallen_scale`` while fallen (see action_rate_l2_fallen_scaled)."""
     asset: Entity = env.scene[asset_cfg.name]
-    return joint_torque_rate_l2(env, asset_cfg) * _fallen_scale(env, asset, fallen_scale, gate_tilt_above_deg)
+    return joint_torque_rate_l2(env, asset_cfg) * _fallen_scale(env, asset, fallen_scale, gate_tilt_above_deg, also_when_handled)
 
 
 # ── VelStand: being handled (GitHub issue #47) ────────────────────────────────

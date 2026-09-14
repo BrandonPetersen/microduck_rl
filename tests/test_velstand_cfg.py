@@ -303,6 +303,17 @@ def test_side_prob_zero_keeps_face_spawns():
     assert (tilt > 89).all() and (xz < -0.99).all()   # face-down: nose points down
 
 
+def test_smoothness_scale_also_when_handled(monkeypatch):
+    from mjlab_microduck.tasks import mdp as m
+    class _E:
+        num_envs = 2; device = "cpu"
+    env = _E()
+    monkeypatch.setattr(m, "_fallen_mask", lambda env, asset, z, tilt: torch.tensor([False, False]))
+    st = m._hand_state(env); st["phase"][1] = 1
+    assert m._fallen_scale(env, None, 0.1, 40.0).tolist() == [1.0, 1.0]
+    assert torch.allclose(m._fallen_scale(env, None, 0.1, 40.0, also_when_handled=True), torch.tensor([1.0, 0.1]))
+
+
 def test_fallen_scaled_action_rate(monkeypatch):
     class _AM:
         action = torch.tensor([[1.0] * 14, [1.0] * 14]); prev_action = torch.zeros(2, 14)
@@ -424,6 +435,12 @@ def test_handling_wiring():
         mod, _, fn = t.params["inner"].rpartition(".")
         assert callable(getattr(__import__(mod, fromlist=[fn]), fn))
     assert cfg.rewards["air_time"].weight == 3.0  # weight preserved through the gate
+    # gx23cufv lesson: smoothness costs scaled while held, pick-up duty ramped and ≈10 %
+    for name in ("action_rate_l2", "joint_torque_rate_l2"):
+        assert cfg.rewards[name].params["also_when_handled"] is True
+    stages = cfg.curriculum["pickup_rate"].params["param_stages"]
+    assert stages[0]["params"]["pickup_rate_hz"] <= 0.02 and stages[-1]["params"]["pickup_rate_hz"] <= 0.05
+    assert vs.HANDLING_PICKUP_RATE_HZ * (sum(vs.HANDLING_HOLD_S) / 2 + 2.0) <= 0.3  # ≤ ~25 % of time held
 
 
 def test_handled_rewards_zero_when_not_handled_and_positive_when_handled():

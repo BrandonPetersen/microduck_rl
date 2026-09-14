@@ -317,7 +317,18 @@ EXPERT_BC_GATE_TILT_DEG = 35.0
 # see distill.py). Handled-ness is inferred by the policy from proprioception —
 # the 61D obs contract is untouched.
 ENABLE_HANDLING = True
-HANDLING_PICKUP_RATE_HZ = 0.12          # ≈ one pick-up per 8 s of upright/fallen time
+# Pick-up rate. Run gx23cufv (0.12 Hz ≈ 30-40 % of frames held) COLLAPSED: the
+# not-yet-still policy flails in the air, the unscaled action_rate cost was
+# -12/step on those frames (vs -3 walking), value loss 0.5 → 20, PPO diverged
+# (local bisection: hand machinery alone = baseline; pick-ups = blow-up; anchor
+# exclusion irrelevant). Fixes: smoothness costs ×FALLEN_SMOOTHNESS_SCALE while
+# held too (bounded handled_* costs price the flailing), duty ≈ 10 %, ramped.
+HANDLING_PICKUP_RATE_HZ = 0.04
+HANDLING_PICKUP_RAMP = [                 # event_param_curriculum stages (steps relative to run start)
+    {"step": 0,        "params": {"pickup_rate_hz": 0.01}},
+    {"step": 150 * 24, "params": {"pickup_rate_hz": 0.02}},
+    {"step": 400 * 24, "params": {"pickup_rate_hz": HANDLING_PICKUP_RATE_HZ}},
+]
 HANDLING_HOLD_S = (2.0, 5.0)
 HANDLING_LIFT_Z = (0.15, 0.30)          # above the terrain origin
 HANDLING_TILT_DEG = 15.0
@@ -637,6 +648,13 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
             },
         )
         cfg.events["reset_virtual_hand"] = EventTermCfg(func=microduck_mdp.reset_virtual_hand, mode="reset")
+        if not play:
+            cfg.curriculum["pickup_rate"] = CurriculumTermCfg(
+                func=microduck_mdp.event_param_curriculum,
+                params={"event_name": "virtual_hand", "param_stages": HANDLING_PICKUP_RAMP},
+            )
+        for name in ("action_rate_l2", "joint_torque_rate_l2"):
+            cfg.rewards[name].params["also_when_handled"] = True
         cfg.rewards["handled_joint_vel"] = RewardTermCfg(func=microduck_mdp.handled_joint_vel_l1, weight=HANDLED_JOINT_VEL_WEIGHT)
         cfg.rewards["handled_pose"] = RewardTermCfg(func=microduck_mdp.handled_pose_l1, weight=HANDLED_POSE_WEIGHT)
         for name in HANDLING_GATED_REWARDS:
