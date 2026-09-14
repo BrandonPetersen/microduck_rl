@@ -84,6 +84,48 @@ PLAY_FACE_UP = None
 _PLAY_FACE_DOWN_SHARE = 2.0 / 3.0
 
 
+# ── Play override: force the wheel ROLLING FRICTION ───────────────────────────
+# Same mechanism as PLAY_FACE_UP, and just as load-bearing. A play env is rebuilt
+# from scratch, so common_step_counter restarts at 0 and wheel_friction_curriculum
+# applies its stage 0 — 0.05, i.e. nearly locked wheels. Every play session
+# therefore shows a robot whose wheels do not turn, whatever the checkpoint.
+#
+# Measured at 32 envs, standing spawns, HOME ctrl:
+#
+#   frictionloss   |ω wheel| max, free settle   under a 0.5 m/s push
+#   0.0500 (stage 0)          0.29 rad/s              0.40 rad/s
+#   0.0015 (stage 4)         23.18 rad/s             24.83 rad/s
+#
+# A factor of 85. A post-4000 checkpoint trains at 0.0015 and can only be judged
+# by eye at 0.0015; watching it at stage 0 shows a behaviour it was never trained
+# for, and hides every sliding/rolling artefact that shows up on the real robot.
+#
+#   STANDUP_PLAY_WHEEL_FRICTION=0.0015  -> the real rolling value (stage 4)
+#   STANDUP_PLAY_WHEEL_FRICTION=0.05    -> stage 0, the bootstrap value
+#   unset / "none" / "curriculum"        -> default (stage 0, as before)
+#
+# play=True ONLY — training and its curriculum are untouched.
+PLAY_WHEEL_FRICTION = None
+
+
+def _resolve_play_wheel_friction():
+    """Wheel frictionloss forced at play time, or None to keep the curriculum."""
+    raw = os.environ.get("STANDUP_PLAY_WHEEL_FRICTION")
+    if raw is None:
+        return PLAY_WHEEL_FRICTION
+    raw = raw.strip().lower()
+    if raw in ("", "none", "curriculum"):
+        return None
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        print(
+            f"[roller_standup] STANDUP_PLAY_WHEEL_FRICTION='{raw}' invalid "
+            f"-> default {PLAY_WHEEL_FRICTION}"
+        )
+        return PLAY_WHEEL_FRICTION
+
+
 def _resolve_play_face_up():
     """Share of back starts at play: STANDUP_PLAY_FACE_UP env var, else the constant."""
     raw = os.environ.get("STANDUP_PLAY_FACE_UP")
@@ -722,6 +764,22 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # keeps the event's DEFAULT value consistent with the curriculum's stage 0, in
     # case someone later removes the curriculum and leaves the event in place.
     cfg.events["randomize_wheel_friction"].params["ranges"] = _WHEEL_FRICTION_STAGE0
+
+    # Play override — MUST come after the curriculum is defined above, otherwise
+    # the `del` hits a missing key and the curriculum is recreated right after.
+    # Both halves are required for the same reason the face-up override needs
+    # both: the curriculum runs BEFORE the reset events, so writing the event
+    # alone is silently overwritten with stage 0 on the very first reset. That is
+    # not a theory — it defeated the first attempt at measuring the wheel spin,
+    # which reported 0.29 rad/s instead of 23 rad/s.
+    if play:
+        play_wheel_friction = _resolve_play_wheel_friction()
+        if play_wheel_friction is not None:
+            cfg.events["randomize_wheel_friction"].params["ranges"] = (
+                play_wheel_friction,
+                play_wheel_friction,
+            )
+            del cfg.curriculum["wheel_friction"]
 
     # ── action_rate: standup's ramp, not the roller's ────────────────────────
     # The roller env climbs to -2.0 for a calm gait. That is a motion-blocker: it

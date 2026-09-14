@@ -923,3 +923,60 @@ def test_backlash_variant_keeps_the_support_gate():
         bl.rewards["standing_composite"].func
         is microduck_mdp.standing_composite_score_on_wheels
     )
+
+
+# ── Play override: forcing the wheel rolling friction ─────────────────────────
+# Without it a play NEVER shows rolling wheels: the play env is rebuilt, so
+# common_step_counter restarts at 0 and wheel_friction_curriculum applies stage 0
+# (0.05, nearly locked). Measured at 32 envs, standing spawns, HOME ctrl:
+#
+#   0.0500 (stage 0) -> |ω wheel| max  0.29 rad/s   (0.40 under a 0.5 m/s push)
+#   0.0015 (stage 4) -> |ω wheel| max 23.18 rad/s  (24.83 under the same push)
+#
+# A factor of 85. A post-4000 checkpoint trains at 0.0015 and can only be judged
+# by eye at 0.0015.
+
+
+def test_play_wheel_friction_override_forces_the_value(monkeypatch):
+    monkeypatch.setenv("STANDUP_PLAY_WHEEL_FRICTION", "0.0015")
+    cfg = make_microduck_roller_standup_env_cfg(play=True)
+    assert cfg.events["randomize_wheel_friction"].params["ranges"] == (0.0015, 0.0015)
+    # Both halves are required: the curriculum runs BEFORE the reset events, so
+    # writing the event alone would be overwritten with stage 0 at the first
+    # reset. This is the bug that defeated the first wheel-spin measurement.
+    assert "wheel_friction" not in cfg.curriculum
+
+
+def test_play_wheel_friction_override_ignored_during_training(monkeypatch):
+    monkeypatch.setenv("STANDUP_PLAY_WHEEL_FRICTION", "0.0015")
+    cfg = make_microduck_roller_standup_env_cfg(play=False)
+    stage0 = cfg.curriculum["wheel_friction"].params["ranges_stages"][0]["ranges"]
+    assert cfg.events["randomize_wheel_friction"].params["ranges"] == stage0
+    assert "wheel_friction" in cfg.curriculum
+
+
+def test_play_without_wheel_friction_override_keeps_the_curriculum(monkeypatch):
+    monkeypatch.delenv("STANDUP_PLAY_WHEEL_FRICTION", raising=False)
+    cfg = make_microduck_roller_standup_env_cfg(play=True)
+    assert "wheel_friction" in cfg.curriculum
+
+
+def test_play_wheel_friction_override_invalid_value_falls_back(monkeypatch):
+    monkeypatch.setenv("STANDUP_PLAY_WHEEL_FRICTION", "nonsense")
+    cfg = make_microduck_roller_standup_env_cfg(play=True)
+    assert "wheel_friction" in cfg.curriculum
+
+
+def test_play_overrides_are_independent(monkeypatch):
+    """Forcing back starts must not disturb the friction, and vice versa."""
+    monkeypatch.setenv("STANDUP_PLAY_FACE_UP", "1.0")
+    monkeypatch.delenv("STANDUP_PLAY_WHEEL_FRICTION", raising=False)
+    cfg = make_microduck_roller_standup_env_cfg(play=True)
+    assert "ground_state_mix" not in cfg.curriculum
+    assert "wheel_friction" in cfg.curriculum
+
+    monkeypatch.delenv("STANDUP_PLAY_FACE_UP", raising=False)
+    monkeypatch.setenv("STANDUP_PLAY_WHEEL_FRICTION", "0.0015")
+    cfg = make_microduck_roller_standup_env_cfg(play=True)
+    assert "ground_state_mix" in cfg.curriculum
+    assert "wheel_friction" not in cfg.curriculum

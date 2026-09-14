@@ -519,3 +519,81 @@ not a penalty. It does not belong in the "every penalty ≤ 0" check.
 Random policy reads ≈ **−0.03** (flailing loses height). A population that rises and holds
 should read ≈ **+0.065/step** (+18.4 spread over a 300-step episode). **Crossing zero is the
 signal that the back is being learned.**
+
+---
+
+## ✅ The wheels DO roll — and the friction result, now on valid evidence
+
+Run `w6rarsdz` (with `height_progress`) crossed every friction stage while the standup
+actually worked. `standing_composite` held at ~94 % of max the whole way while
+`ground_state_mix` fell from 0.50 to 0.20 — the two are fully decoupled, so the old failure
+signature is gone and the measurement finally means something.
+
+| iter | `wheel_friction` | `standing_composite` |
+|---|---|---|
+| 0–1000 | 0.0500 | 3.56 – 3.59 |
+| 1000–2000 | 0.0200 | 3.54 – 3.57 |
+| 2000–3000 | 0.0080 | 3.51 – 3.54 |
+| 3000–4000 | 0.0030 | 3.51 – 3.54 |
+| **4000–5007** | **0.0015** | **3.51 – 3.55** |
+
+Flat across a **33× reduction**. And the parameter is not inert — measured at 32 envs,
+standing spawns, HOME ctrl:
+
+| | frictionloss in the model | \|ω wheel\| max, free settle | under a 0.5 m/s push |
+|---|---|---|---|
+| stage 0 | 0.0500 | 0.29 rad/s | 0.40 rad/s |
+| **stage 4** | **0.0015** | **23.18 rad/s** | **24.83 rad/s** |
+
+**A factor of 85 in wheel spin, and the standup does not care.** The wheels are genuinely not
+the hard part — this time measured on a run that stands up, on a parameter verified to reach
+the model. (`dr.dof_frictionloss` is NOT a BAM no-op for the passive wheels; AGENTS.md's
+warning is about actuated joints.)
+
+### 🐛 Why none of this was visible in play
+
+**A play env runs at stage 0.** It is rebuilt from scratch, so `common_step_counter` restarts
+at 0 and `wheel_friction_curriculum` applies 0.05 — nearly locked wheels — whatever checkpoint
+is loaded. Every play session showed a robot whose wheels barely turn (0.3 rad/s instead of
+25), which makes a post-4000 policy impossible to judge by eye and hides exactly the
+sliding/rolling behaviour that shows up on the real robot.
+
+`STANDUP_PLAY_WHEEL_FRICTION` forces it, `play=True` only:
+
+```bash
+STANDUP_PLAY_WHEEL_FRICTION=0.0015 md-play   # the real rolling value (stage 4)
+STANDUP_PLAY_WHEEL_FRICTION=0.05   md-play   # stage 0, the bootstrap value
+```
+
+⚠️ Like the face-up override, it needs BOTH halves — write the event AND delete the
+curriculum. Writing the event alone is silently overwritten with stage 0 at the first reset,
+because the curriculum manager runs before the reset events. That is not a theory: it defeated
+the first attempt at this very measurement, which reported 0.29 rad/s instead of 23.
+
+**Method lesson**: any "forced" value in a play env has to survive the curriculum, or it is
+not forced. Check the value that actually reaches `sim.model`, not the one you wrote.
+
+### Violence on the real robot: nothing is fighting it
+
+Measured at iteration 5007, per step:
+
+| term | /step | weight |
+|---|---|---|
+| `action_rate_l2` | −0.284 | −1.0 |
+| `body_ang_vel` | −0.109 | −0.05 |
+| `arrival_damping` | −0.0140 | −0.05 |
+| `gentle_rise` | −0.0022 | +0.005 |
+| `joint_torque_rate_l2` | **−0.0001** | −1e-3 |
+| *positive task* | *≈ +8.9* | |
+
+The three anti-violence terms together are **0.18 % of the task reward**. The only two that
+weigh anything are `action_rate_l2` and `body_ang_vel` — the documented motion-blockers that
+must NOT be raised (at −1.2 and −0.15 they froze back recovery).
+
+`joint_torque_rate_l2` is the safe lever and it has enormous headroom: the doc's formula
+(contribution ≈ `0.1 × |weight|`) is confirmed exactly by the measurement, and the term sits
+**2000× below** the point where it would matter. Raise that one, not the blockers.
+
+⚠️ And judge violence on a **post-4000** checkpoint: before 3000 both `arrival_damping` and
+`joint_torque_rate_l2` are at exactly 0, so an earlier checkpoint has no damping at all *and*
+33× too much wheel friction.
