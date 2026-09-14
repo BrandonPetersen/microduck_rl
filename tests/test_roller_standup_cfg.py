@@ -256,6 +256,9 @@ def test_recovery_rewards_present_with_expected_weights():
         "upright_linear":       1.5,
         "upright_sharp":        1.5,
         "standing_composite":   3.75,
+        # Potential-based Δz, the gradient off the floor. See
+        # test_height_progress_weight_cancels_the_action_tax for the derivation.
+        "height_progress":      200.0,
         # 0 at start: introduced late by torque_rate_weight (see
         # test_anti_violence_terms_are_introduced_late).
         "joint_torque_rate_l2": 0.0,
@@ -595,6 +598,10 @@ def test_height_l1_stays_the_dominant_task_term():
 
     Scale-invariant assertion: the whole block has already been divided by 4 once,
     so we check the RATIO rather than an absolute value.
+
+    height_progress is deliberately NOT in this comparison: its weight multiplies
+    a per-step Δz in metres (~0.001), not a level in [0, 1], so 200 there is not
+    comparable to 7.5 here. Do not "fix" the two into agreement.
     """
     cfg = make_microduck_roller_standup_env_cfg()
     task_terms = (
@@ -839,6 +846,62 @@ def test_climb_shaping_stays_ungated():
     assert cfg.rewards["height_stand_sharp"].func is microduck_mdp.height_target_gaussian
     assert cfg.rewards["height_stand_l1"].func is microduck_mdp.height_l1_penalty
     assert cfg.rewards["upright_linear"].func is microduck_mdp.body_upright_linear
+    # height_progress is the term that carries the gradient off the floor: gating
+    # it would defeat its entire purpose.
+    assert cfg.rewards["height_progress"].func is microduck_mdp.height_progress
+
+
+def test_height_progress_is_present_and_capped_at_the_roller_stand():
+    """The gradient the back start lacks, and the reason it is a Δ and not a level.
+
+    Measured on the supine→prone roll sweep: the whole rollover is worth
+    +0.156/step and its first half is downhill (on the side the trunk sits 7 mm
+    lower than on the back, so height_stand_l1 penalises starting the move).
+    Every gated term reads 0.0000 across the full 180°.
+
+    height_progress pays Δ min(z, ceiling): rising pays, holding pays exactly
+    zero, falling refunds. A level-based reward (a wider height_stand Gaussian)
+    would buy the same floor gradient at the price of paying 0.267/step for
+    merely lying on the back — a free floor, the mechanism behind the tripod.
+
+    It measures HEIGHT, not posture, so it prescribes no technique.
+    """
+    from mjlab_microduck.tasks.microduck_roller_standup_env_cfg import ROLLER_STAND_Z
+
+    cfg = make_microduck_roller_standup_env_cfg()
+    term = cfg.rewards["height_progress"]
+    # Positive weight: the function returns a signed Δ, so rising must pay.
+    assert term.weight > 0
+    # Capped at the standing height: hopping higher must pay nothing extra.
+    assert term.params["ceiling"] == ROLLER_STAND_Z
+
+
+def test_height_progress_weight_cancels_the_action_tax():
+    """The weight is derived, not guessed — keep the derivation checkable.
+
+    Full rise 0.046 → 0.138 = 0.092 m. At weight w the climb collects w·0.092,
+    and a 2 s climb (100 steps, 0.92 mm/step) pays w·0.00092 per step. The target
+    is to cancel the ~-0.2/step that action_rate_l2 charges a smooth policy at
+    its full -1.0 weight, i.e. w ≈ 217.
+
+    velstand runs the same function at weight 30, but there it is a last-mile
+    helper on top of a working recovery; here it must be the primary gradient
+    across a 9 cm unpaid region. Being potential-based (Ng et al.), it is
+    policy-invariant — a large weight cannot create a new optimum.
+    """
+    from mjlab_microduck.tasks.microduck_roller_standup_env_cfg import ROLLER_STAND_Z
+
+    cfg = make_microduck_roller_standup_env_cfg()
+    w = cfg.rewards["height_progress"].weight
+    per_step = w * 0.00092
+    assert 0.1 <= per_step <= 0.5, (
+        f"weight {w} pays {per_step:.3f}/step on a 2 s climb; the point is to be "
+        f"the same order as action_rate_l2's ~-0.2/step"
+    )
+    # And the full climb must stay small against the standing payout (~10/step),
+    # so the shaping stays a nudge rather than a destination of its own.
+    full_climb = w * (ROLLER_STAND_Z - 0.046)
+    assert full_climb < 40.0, f"full climb pays {full_climb:.1f}, too close to a jackpot"
 
 
 def test_composite_weight_unchanged_by_the_gate():

@@ -336,6 +336,62 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
         },
     )
 
+    # ── Potential-based height progress — the gradient the back start lacks ──
+    # MEASURED PROBLEM (run at iter 2500: face-down standup works, the back never
+    # moves). Sweeping the supine→prone roll by 10° steps, 8 envs per angle, the
+    # total reward reads:
+    #
+    #     roll   0° (flat on back)   -0.719     <- every gated term is 0.0000
+    #     roll  90° (on the side)    -0.757     <- WORSE than staying on the back
+    #     roll 180° (face down)      -0.563
+    #
+    # So the entire rollover is worth +0.156/step, and its first half is
+    # DOWNHILL: on the side the trunk sits 7 mm lower than on the back, so
+    # height_stand_l1 actively penalises starting the move. Meanwhile moving
+    # costs action_rate_l2 at its full -1.0 (~-0.2/step for a smooth policy).
+    # Doing nothing is simply the better deal, whatever technique the policy
+    # might otherwise invent.
+    #
+    # This also explains why face_up_roll_max alone did not unlock the back: a
+    # reverse curriculum supplies on-policy DATA, it does not create a gradient,
+    # and the data said rolling does not pay.
+    #
+    # WHY THIS TERM AND NOT A WIDER height_stand GAUSSIAN: widening the std to
+    # 0.08 would give the same gradient at floor level, but it pays 0.267/step
+    # for merely LYING on the back (against 0.005 today) while the standing robot
+    # gains nothing — the standing/lying gap shrinks and a free floor reappears.
+    # Any reward that pays for BEING at a height necessarily pays for being there
+    # effortlessly. This one pays for GAINING height, so holding any pose is
+    # worth exactly zero.
+    #
+    # TECHNIQUE-AGNOSTIC ON PURPOSE: it measures trunk height, not posture. Roll,
+    # pike, pivot on a shoulder, or anything nobody has thought of — all paid the
+    # same, per centimetre gained. The path stays what RL is supposed to discover.
+    #
+    # Potential-based (Ng et al.), so it is policy-invariant: it cannot create a
+    # new optimum, which is what makes a large weight safe here.
+    #
+    # WEIGHT 200, derived rather than guessed:
+    #   full rise 0.046 → 0.138 = 0.092 m  →  total +18.4 over the climb
+    #   a 2 s climb (100 steps) ≈ 0.92 mm/step  →  +0.18/step
+    # which roughly cancels the -0.2/step that action_rate_l2 charges a smooth
+    # policy. That is the target: make progress at a plausible climb rate pay for
+    # its own action cost. velstand runs the same function at weight 30, but
+    # there it is a last-mile helper on top of a working recovery; here it has to
+    # be the primary gradient across a 9 cm unpaid region.
+    #
+    # Ceiling at ROLLER_STAND_Z so hopping above standing height pays nothing
+    # extra. NOT support-gated, deliberately: the floor is exactly where the
+    # signal is needed.
+    cfg.rewards["height_progress"] = RewardTermCfg(
+        func=microduck_mdp.height_progress,
+        weight=200.0,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", body_names=("trunk_base",)),
+            "ceiling": ROLLER_STAND_Z,
+        },
+    )
+
     # Pays for the MOTION of rising, not only the destination: without it,
     # "stay seated collecting the partial pose" dominates. The cutoff sits 10 mm
     # ABOVE the target, otherwise the policy parks at the cutoff altitude and
@@ -629,16 +685,19 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     # we LOWER it, to bootstrap the gesture on an easy problem (nearly-locked
     # wheels ≈ feet) before imposing the real rolling physics.
     #
-    # ⚠️ MEASURED RESULT (run fmt83tri): this curriculum is a NON-EVENT. At all
-    # three stages (1000/2000/3000, i.e. 0.05 → 0.003, a factor 17)
-    # standing_composite does not drop — at 2000 and 3000 it even rises just
-    # after. The two curricula land on different iterations (600/1500/2500 vs
-    # 1000/2000/3000), so the attribution is clean. The founding hypothesis of
-    # this env is therefore refuted: the wheels are NOT the hard part.
+    # ⚠️ PARTIAL MEASUREMENT, DO NOT ACT ON IT YET (run fmt83tri): at all three
+    # stages (1000/2000/3000, i.e. 0.05 → 0.003, a factor 17) standing_composite
+    # did not drop — at 2000 and 3000 it even rose just after.
     #
-    # Scheduling consequence: this curriculum spends 4000 iterations on a
-    # non-problem, and it is what pushes the anti-violence terms out to 3000.
-    # Candidate for compression once the standup itself works.
+    # But that run NEVER STOOD UP: its composite tracked standing_prob, and its
+    # behaviour was a head tripod, which does not carry the body on the wheels at
+    # all. A friction that only matters to a wheel-supported rise could not have
+    # shown up there. The earlier note in this file calling the curriculum a
+    # "non-event" and the wheel hypothesis "refuted" was therefore premature.
+    #
+    # The first real test is the run where the face-down standup works: stages
+    # 3000 (0.003) and 4000 (0.0015) are then the ones to watch. Do not compress
+    # this curriculum before that evidence exists.
     #
     # sim2real note: only checkpoints AFTER the last stage (iter 4000+) are
     # deployment candidates. Before that the policy leans on a rolling friction

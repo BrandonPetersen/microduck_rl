@@ -89,7 +89,7 @@ The wheels roll, so there is no longitudinal grip to push against the floor. The
 | 3000 | 0.003 | |
 | 4000 | 0.0015 | the real rolling value |
 
-⚠️ **Run fmt83tri measured this curriculum to be a NON-EVENT** — see the results section below. The founding hypothesis of this env is refuted.
+⚠️ **Not yet tested.** Run fmt83tri showed no drop at any stage, but that run never stood up (see the results section) — so the measurement cannot speak for a wheel-supported rise. Do not compress this curriculum before a run where the standup actually works.
 
 **Sim2real**: only checkpoints after iter 4000 are deployment candidates. Before that, the policy leans on a friction that does not exist on the real robot.
 
@@ -344,17 +344,24 @@ reverse curriculum with no stage to tune. Verified with no spawn penetration (0/
 floor); 42 mm median drop at reset, a known artefact of the `prone_z` floor shared between
 back and belly.
 
-### ✅ Measured result: the wheels are NOT the hard part
+### ⚠️ The friction curriculum: measurement retracted, not confirmed
 
-At all three stages of the friction curriculum (1000 / 2000 / 3000, i.e. 0.05 → 0.003, a
-factor of 17), `standing_composite` **does not drop** — at 2000 and 3000 it even rises just
-after. The two curricula land on different iterations (600/1500/2500 vs 1000/2000/3000), so
-the attribution is clean.
+At all three stages (1000 / 2000 / 3000, i.e. 0.05 → 0.003, a factor of 17),
+`standing_composite` **did not drop** — at 2000 and 3000 it even rose just after. The two
+curricula land on different iterations (600/1500/2500 vs 1000/2000/3000), so the attribution
+would have been clean.
 
-**The founding hypothesis of this env is refuted.** The gesture is not blocked by the absence
-of longitudinal grip. Scheduling consequence: the friction curriculum spends 4000 iterations
-on a non-problem, and it is what pushes the anti-violence terms out to 3000. A compression
-candidate once the standup itself works.
+**But this was first written up as "the wheels are NOT the hard part", and that conclusion was
+premature.** Run fmt83tri never stood up: its composite tracked `standing_prob` and its
+behaviour was a head tripod, which does not carry the body on the wheels at all. A friction
+that only matters to a *wheel-supported* rise could not possibly have shown up in it.
+
+The first real test is a run where the face-down standup works — stages **3000 (0.003)** and
+**4000 (0.0015)** are then the ones to watch. **Do not compress this curriculum before that
+evidence exists.**
+
+Method note worth keeping: a null result measured on a degenerate run is not a null result.
+The question has to be *reachable* by the behaviour being observed.
 
 ### 🐛 The v1 gate's leak — hips and shins
 
@@ -430,3 +437,85 @@ The "already standing" bucket is therefore NOT a free ride: holding the stand on
 already an active control problem. Consequence for reading the curves: envs spawned standing do
 not automatically score `standing_prob`, they only score if they hold — part of the gap between
 `standing_composite/3.75` and `ground_state_mix` comes from that, not only from the ground envs.
+
+---
+
+## 🟡 Iteration 2500: face-down works, the back never moves
+
+First observation of a real standup on this env — **from face-down only**. From the back the
+robot stays lying, motionless.
+
+### Measured: the roll has no gradient, and its first half is downhill
+
+Reward landscape swept along the supine→prone roll (10° steps, 8 envs per angle, no policy —
+this is a property of the env, not of a checkpoint):
+
+| roll | total | `height_stand_l1` | `upright_linear` | gated terms |
+|---|---|---|---|---|
+| **0° (flat on back)** | −0.719 | −0.686 | −0.006 | **0** |
+| 50° | −0.915 | −0.731 | +0.029 | 0 |
+| **90° (on the side)** | **−0.757** | **−0.739** | +0.032 | **0** |
+| 120° | −0.782 | −0.725 | +0.069 | 0 |
+| **180° (face down)** | −0.563 | −0.628 | +0.092 | 0 |
+
+1. **The whole rollover is worth +0.156/step.** Against `action_rate_l2` at its full −1.0
+   (≈ −0.2/step for a smooth policy), moving is net negative.
+2. **The first half is DOWNHILL**: on the side the trunk sits 7 mm lower than on the back
+   (z 0.0465 → 0.0395), so `height_stand_l1` actively penalises starting the move.
+3. **Every gated term reads 0.0000 across the full 180°** — by design, but it means the only
+   live signal during the entire gesture is `height_stand_l1`, pointing the wrong way.
+
+This also explains why `face_up_roll_max` alone did not unlock the back: **a reverse curriculum
+supplies on-policy DATA, it does not create a gradient**, and the data said rolling does not pay.
+
+### Fix — `height_progress`, potential-based Δz (weight 200)
+
+Ported from `velstand` (same function, weight 30 there). Pays `Δ min(z, ROLLER_STAND_Z)`:
+rising pays, **holding pays exactly zero**, falling refunds, hopping above the stand pays
+nothing extra. Ungated on purpose — the floor is where the signal is needed.
+
+**Why a Δ and not a wider `height_stand` Gaussian.** Widening the std 0.04 → 0.08 buys the same
+floor gradient (0.006 → 0.077 per cm, ×13) but pays **0.267/step for merely lying on the back**
+(against 0.005 today) while the standing robot gains nothing — the standing/lying gap shrinks
+and a free floor reappears. Any reward that pays for *being* at a height pays for being there
+effortlessly. That is the exact mechanism behind the tripod.
+
+**Why it prescribes no technique.** It measures trunk height, not posture. Roll, pike, pivot on
+a shoulder, or something nobody has pictured — all paid identically, per centimetre gained. The
+path stays what RL is supposed to discover. (An earlier proposal to reward *turning onto the
+belly* was rejected for exactly this reason: it would have imposed the rollover and paid zero
+to any other solution.)
+
+Being potential-based (Ng et al.) it is **policy-invariant** — it cannot create a new optimum,
+which is what makes a large weight safe.
+
+**Weight derivation** (keep it checkable, see `test_height_progress_weight_cancels_the_action_tax`):
+full rise 0.046 → 0.138 = 0.092 m → total **+18.4**; a 2 s climb (100 steps, 0.92 mm/step) pays
+**+0.18/step**, cancelling `action_rate_l2`'s ≈ −0.2/step. `velstand` uses 30 because there it
+is a last-mile helper on a working recovery; here it is the primary gradient across 9 cm of
+unpaid ground.
+
+⚠️ Its weight multiplies a **Δz in metres** (~0.001/step), not a level in [0, 1] — 200 here is
+not comparable to `height_stand_l1`'s 7.5. Do not "fix" them into agreement.
+
+### Verified in the env (not on paper)
+
+```
+weight=200  ceiling=0.138
+hold 40 steps          : -0.043      (claim: ~0)                     ✓
+forced +1 cm           : +2.000 exactly, every cm                    ✓
+above the ceiling      : +0.000                                      ✓
+reset settle           : -1.82 once, bounded and action-independent  ✓
+```
+
+The `fresh` guard (`episode_length_buf <= 1`) absorbs most of the reset drop: of the 41.7 mm
+fall, only 9.1 mm is charged.
+
+### Reading it
+
+⚠️ **`height_progress` is the one term that legitimately logs either sign** — it is a signed Δ,
+not a penalty. It does not belong in the "every penalty ≤ 0" check.
+
+Random policy reads ≈ **−0.03** (flailing loses height). A population that rises and holds
+should read ≈ **+0.065/step** (+18.4 spread over a 300-step episode). **Crossing zero is the
+signal that the back is being learned.**
