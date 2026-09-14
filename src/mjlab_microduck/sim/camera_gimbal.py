@@ -55,6 +55,16 @@ CAMERA = "head_camera"
 RANGE_RAD = 0.52                      # +-30 deg
 KP = 30.0                             # a camera is grams; this is a small servo, not a neck one
 FORCE = 2.0                           # Nm, generous for the load
+# **Armature and damping, or the mount rings.** A 5 g body on a kp=30 spring has a natural
+# frequency near 2700 Hz against a 200 Hz physics step -- numerically stiff, and it oscillates.
+# Measured, that ringing was the whole problem: the gimbal's residual rotation came out as white
+# noise (lag-1 autocorrelation +0.065) where the software warp's residual is smooth (+0.548), and
+# unpredictable inter-frame rotation is far worse for frame-to-frame estimation than smooth
+# rotation of larger magnitude. Armature adds effective inertia to bring the natural frequency
+# down to ~27 Hz; the velocity term damps what is left to roughly critical.
+ARMATURE = 0.001
+DAMPING = 0.05
+KV = 0.35                             # ~2*sqrt(KP*ARMATURE), i.e. near-critical
 
 
 def add_camera_gimbal(spec: mujoco.MjSpec, prefix: str = "") -> None:
@@ -92,7 +102,8 @@ def add_camera_gimbal(spec: mujoco.MjSpec, prefix: str = "") -> None:
     g = host.add_body(name=f"{prefix}cam_gimbal", pos=pos, quat=[1.0, 0.0, 0.0, 0.0])
     for j in GIMBAL_JOINTS:
         g.add_joint(name=f"{prefix}{j}", type=mujoco.mjtJoint.mjJNT_HINGE,
-                    axis=list(GIMBAL_AXES[j]), range=[-RANGE_RAD, RANGE_RAD])
+                    axis=list(GIMBAL_AXES[j]), range=[-RANGE_RAD, RANGE_RAD],
+                    armature=ARMATURE, damping=DAMPING)
     # A token inertial: MuJoCo needs mass on a body carrying joints, and the real part is light.
     g.add_geom(name=f"{prefix}cam_gimbal_geom", type=mujoco.mjtGeom.mjGEOM_BOX,
                size=[0.004, 0.004, 0.004], mass=0.005, contype=0, conaffinity=0, group=3)
@@ -106,6 +117,7 @@ def add_camera_gimbal(spec: mujoco.MjSpec, prefix: str = "") -> None:
         a.biastype = mujoco.mjtBias.mjBIAS_AFFINE
         a.gainprm[0] = KP
         a.biasprm[1] = -KP
+        a.biasprm[2] = -KV
         a.forcerange = [-FORCE, FORCE]
         a.ctrlrange = [-RANGE_RAD, RANGE_RAD]
 
