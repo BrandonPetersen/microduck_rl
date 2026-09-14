@@ -402,3 +402,31 @@ s'ouvre-t-elle debout, ET reste-t-elle fermée sur chaque vautrage stable ?
 ⚠️ `standing_composite` écrase par un facteur de verticalité d'écart-type 0.40 : à 32°
 d'inclinaison ce facteur vaut déjà 0.39. Un composite bas peut donc vouloir dire « penché »
 plutôt que « pas debout » — c'est `pose_stand_legs` (gaté) qui départage.
+
+### ✅ `ROLLER_STAND_Z = 0.138` — vérifié sous charge sur le modèle rollers
+
+L'hypothèse non vérifiée était l'affaissement : `0.1407` venait bien d'une cinématique exacte
+sur `scene_rollers.xml`, mais le passage à `0.138` **empruntait** les ~2 mm d'affaissement
+mesurés sur le modèle SANS roues.
+
+Mesure directe (512 envs spawnés debout, ctrl HOME, DR coupée, envs à tilt < 5° seulement) :
+
+| pas | envs droits | z médian | écart à 0.138 |
+|---|---|---|---|
+| 5 | 512 | 0.1393 | +1.3 mm |
+| 10 | 512 | 0.1388 | +0.8 mm |
+| 20 | 12 | 0.1386 | +0.6 mm |
+
+Affaissement réel : 0.1407 → 0.1386 = **2,1 mm**, contre 2,2 mm empruntés. L'emprunt était bon.
+`height_stand_sharp` ayant un std de 15 mm, une erreur de cible de 1 mm lui coûte 0,4 % — sans
+effet.
+
+⚠️ **Effet de bord mesuré, plus important que la hauteur elle-même** : 512 envs droits au pas
+10, il n'en reste que **12 au pas 20**. Sans DR, sans bruit d'inclinaison, sans poussée. Debout
+sur quatre roues libres avec un PD vers HOME, le robot bascule en **0,4 s**.
+
+Le bucket « déjà debout » n'est donc PAS un ticket gratuit : tenir la station sur rollers est
+déjà un problème de contrôle actif. Conséquence pour la lecture des courbes : les envs spawnés
+debout ne marquent pas automatiquement `standing_prob`, ils ne marquent que s'ils tiennent —
+une partie de l'écart `standing_composite/3.75` vs `ground_state_mix` vient de là, pas
+seulement des envs au sol.
