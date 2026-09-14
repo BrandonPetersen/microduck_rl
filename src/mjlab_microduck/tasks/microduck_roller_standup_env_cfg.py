@@ -834,9 +834,47 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
         func=microduck_mdp.reward_weight,
         params={
             "reward_name":   "joint_torque_rate_l2",
+            # RAISED from the -1e-3 the walker settled on. Measured at iteration
+            # 5007 of run w6rarsdz (the first recipe that stands up), per step:
+            #
+            #   action_rate_l2        -0.284   (weight -1.0)   <- motion-blocker
+            #   body_ang_vel          -0.109   (weight -0.05)  <- motion-blocker
+            #   arrival_damping       -0.0140  (weight -0.05)
+            #   gentle_rise           -0.0022  (weight +0.005)
+            #   joint_torque_rate_l2  -0.0001  (weight -1e-3)
+            #   positive task         ≈ +8.9
+            #
+            # The three anti-violence terms together are 0.18 % of the task
+            # reward. They cannot possibly be what shapes the motion, and the
+            # policy is violent on the real robot accordingly: it stands up in
+            # 25 steps (0.5 s) from flat on its back, with 40 rad/s peaks in the
+            # wheels. Nothing opposes speed — standing pays ~+10/step, so
+            # arriving half a second earlier is worth ~+25 of return, and
+            # com_upward_velocity / height_progress both pay the rise without any
+            # rate cap. AGENTS.md's "no jackpot" rule, caught in the act.
+            #
+            # THIS is the term to raise, not the two motion-blockers above: it
+            # penalises torque VARIATION, not motion or rotation, and standup
+            # identified it as the only damper that does not kill back recovery
+            # (at -0.15 body_ang_vel and -1.2 action_rate both froze it).
+            #
+            # Magnitudes from the doc's formula, confirmed exactly by the run:
+            # contribution ≈ 0.1 × |weight| (measured -0.0001 at -1e-3, so raw
+            # |Δτ|² = 0.1). So -0.5 → -0.05/step, -1.5 → -0.15/step, which lands
+            # between arrival_damping and body_ang_vel without touching either.
+            #
+            # Introduction stays at 3000, deliberately. The skill now appears by
+            # iteration ~250 and survived every ground_state_mix stage without a
+            # dip, so an earlier introduction is tempting — but the doc's rule is
+            # to move a tax LATER when in doubt, never earlier, and 3000→6000 is
+            # already 3000 iterations of polish. One change at a time: the
+            # magnitude, not the timing.
+            #
+            # If the standup degrades after 3000, soften the LAST stage first.
             "weight_stages": [
                 {"step": 0,                        "weight": 0.0},
-                {"step": 3000 * NUM_STEPS_PER_ENV, "weight": -1e-3},
+                {"step": 3000 * NUM_STEPS_PER_ENV, "weight": -0.5},
+                {"step": 4500 * NUM_STEPS_PER_ENV, "weight": -1.5},
             ],
         },
     )

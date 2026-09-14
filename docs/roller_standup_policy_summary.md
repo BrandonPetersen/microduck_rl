@@ -597,3 +597,65 @@ must NOT be raised (at −1.2 and −0.15 they froze back recovery).
 ⚠️ And judge violence on a **post-4000** checkpoint: before 3000 both `arrival_damping` and
 `joint_torque_rate_l2` are at exactly 0, so an earlier checkpoint has no damping at all *and*
 33× too much wheel friction.
+
+---
+
+## 📌 Reference: `roller-standup-v1-working` (run `w6rarsdz`)
+
+**Git tag `roller-standup-v1-working`** (commit `00de1a4`) is the first recipe that actually
+stands up, from the belly **and** from the back. Diff any later regression against it.
+Reference checkpoints: **model_4500 / model_5000**.
+
+Measured at `model_4500`, real rolling friction (0.0015), 64 envs:
+
+| | face-down starts | face-up starts |
+|---|---|---|
+| standing at | step 25 (0.5 s) | step 25 (0.5 s) |
+| tilt then | 1.0° | 5.1° → 0.7° by step 50 |
+| trunk z | 0.1389 | 0.1386 |
+| wheel spin during the rise | peak 28 rad/s | **peak 40.5 rad/s, 90 % of wheels > 1 rad/s** |
+| wheel spin once standing | **0.004 rad/s** | **0.004 rad/s** |
+
+At iteration 5007: `standing_composite` 3.53/3.75 (94 %) against `ground_state_mix` 0.20 —
+fully decoupled, `upright_linear` → 13.8° of tilt, `height_stand_l1` → 4 mm of height error,
+`height_progress` +0.030.
+
+What got it there, in order: the **support gate**, dropping **`neck_action_rate_l2`**,
+**`face_up_roll_max = 90°`**, and **`height_progress`**.
+
+### Two measured limitations of that tag
+
+**1. The rise takes 0.5 s and is violent on the real robot.** Nothing opposes speed: standing
+pays ~+10/step so arriving half a second earlier is worth ~+25 of return, while
+`com_upward_velocity` and `height_progress` both pay the rise with no rate cap. AGENTS.md's
+"no jackpot" rule caught in the act. And the damping that should oppose it was 0.18 % of the
+task reward:
+
+| term | /step | weight |
+|---|---|---|
+| `action_rate_l2` | −0.284 | −1.0 ← motion-blocker |
+| `body_ang_vel` | −0.109 | −0.05 ← motion-blocker |
+| `arrival_damping` | −0.0140 | −0.05 |
+| `gentle_rise` | −0.0022 | +0.005 |
+| `joint_torque_rate_l2` | **−0.0001** | −1e-3 |
+
+**Fix applied after the tag**: `joint_torque_rate_l2` raised from −1e-3 to **−0.5 at 3000 →
+−1.5 at 4500** (contributions −0.05 then −0.15/step, from the formula
+`contribution ≈ 0.1 × |weight|`, confirmed exactly by the run). That term, not the two
+motion-blockers: it penalises torque VARIATION, not motion, and `standup` documents
+`body_ang_vel` at −0.15 and `action_rate` at −1.2 as freezing back recovery. Timing kept at
+3000 — raise the magnitude, not the schedule.
+
+If it is still violent, the next lever is a **slewed height target** (pay tracking of a
+constant-rate ramp instead of the height reached, so being ahead pays zero and slow becomes the
+argmax) — AGENTS.md's actual remedy for a jackpot, but more intrusive since it imposes a pace.
+
+**2. The standing phase is a perfectly static equilibrium with the wheels frozen** (0.004 rad/s
+for 125 of 150 steps, tilt 0.5°, height flat to the millimetre). That regime does not exist on
+a real floor — slope, latency, backlash and imperfect contact all make the wheels roll. Nothing
+in the env forces the policy to absorb rolling *while standing*: `push_robot` is ±0.2 m/s every
+3–6 s, i.e. about one push per episode. A serious robustness candidate, separate from the
+violence.
+
+It also explains why the friction curriculum reads flat: **83 % of the episode has no wheel
+motion at all**, and the phase where the wheels do spin lasts half a second.

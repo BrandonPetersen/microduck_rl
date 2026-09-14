@@ -980,3 +980,50 @@ def test_play_overrides_are_independent(monkeypatch):
     cfg = make_microduck_roller_standup_env_cfg(play=True)
     assert "ground_state_mix" in cfg.curriculum
     assert "wheel_friction" not in cfg.curriculum
+
+
+def test_torque_rate_damping_is_actually_large_enough_to_matter():
+    """The anti-violence lever must be above the noise floor.
+
+    Measured at iteration 5007 of run w6rarsdz (the first recipe that stands up):
+    the three anti-violence terms together were 0.18 % of the task reward, with
+    joint_torque_rate_l2 at -0.0001/step. A term that small cannot shape anything,
+    and the policy stood up in 0.5 s accordingly.
+
+    The doc's formula, confirmed exactly by that run: contribution ≈ 0.1 × |weight|
+    (raw |Δτ|² = 0.1 at convergence). We require the final stage to contribute at
+    least 0.05/step, i.e. the same order as arrival_damping and body_ang_vel.
+
+    This is THE term to raise, not action_rate_l2 or body_ang_vel: it penalises
+    torque VARIATION, not motion, and standup documents those two as freezing back
+    recovery at -1.2 and -0.15.
+    """
+    cfg = make_microduck_roller_standup_env_cfg()
+    stages = cfg.curriculum["torque_rate_weight"].params["weight_stages"]
+    final = min(s["weight"] for s in stages)
+    contribution = 0.1 * abs(final)
+    assert contribution >= 0.05, (
+        f"final weight {final} contributes {contribution:.3f}/step; below ~0.05 it "
+        f"is indistinguishable from the 0.0001/step that shaped nothing"
+    )
+    # And it must stay below action_rate_l2's MEASURED cost (0.284/step at its
+    # final -1.0 weight, run w6rarsdz iteration 5007). Note cfg.rewards holds the
+    # stage-0 weight (-0.1); the -1.0 end lives in the action_rate_weight
+    # curriculum, so the literal measurement is the honest bound here.
+    assert contribution <= 0.284, (
+        f"the torque-rate damper contributes {contribution:.3f}/step and would "
+        f"overtake action_rate_l2's measured 0.284/step"
+    )
+
+
+def test_torque_rate_introduction_stays_late():
+    """Raise the magnitude, not the timing — one change at a time.
+
+    The skill now appears by iteration ~250, which makes an earlier introduction
+    tempting. The documented rule is the opposite: move a tax LATER when in doubt,
+    never earlier.
+    """
+    cfg = make_microduck_roller_standup_env_cfg()
+    stages = cfg.curriculum["torque_rate_weight"].params["weight_stages"]
+    first_active = min(s["step"] for s in stages if s["weight"] != 0.0)
+    assert first_active >= 3000 * NUM_STEPS_PER_ENV
