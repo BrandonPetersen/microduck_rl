@@ -201,6 +201,22 @@ Phases (as before, but with a recovery backstop):
   Phase 3 (1500+): prone-init ramp: face-down first (easier), face-up mixed
     in later, capped at 45% prone so the walking data share stays ≥ ~55%
     (was 2/3 prone → ~25% walking share).
+
+Being handled (GitHub issue #47, 2026-09-14, ENABLE_HANDLING): a human picks
+  the robot up, carries it, tilts it, puts it down or drops it. Baseline
+  (velstand 5749 in claude_experiments/velstand_hand_check.py): held in the
+  air it FLAILS — mean servo speed 1.6-4.3 rad/s and action rate ~0.9 vs 0.03
+  while walking — then recovers 100% after put-down or drop. Design: a virtual
+  hand (mdp.virtual_hand_pickup, step event: PD wrench on the trunk + gravity
+  compensation, lift 15-30 cm, drift/yaw/±15° tilt, 2-5 s, 70% put-down / 30%
+  drop; also picks up FALLEN robots and sets them on their feet). Rewards while
+  held: tracking + air_time zeroed (unless_handled), handled_joint_vel and
+  handled_pose costs (go still, legs in HOME); the BC anchor and stand expert
+  skip handled frames (ring buffer aligned with the rollout storage). The obs
+  contract is untouched — handled-ness must be inferred from proprioception
+  (unloaded legs track their targets exactly, gravity direction wanders, no
+  touchdowns). If that proves unlearnable, the same sim data trains a side
+  classifier for the daemon (issue option 2).
 """
 
 import math
@@ -292,6 +308,23 @@ RECOVERY_ECON_KICKIN_ITER = 600 if WARM_START else 1200
 ENABLE_EXPERT_BC = True
 EXPERT_BC_COEF = 1.0
 EXPERT_BC_GATE_TILT_DEG = 35.0
+
+# Being handled (GitHub issue #47): a virtual hand picks the robot up, carries
+# it, tilts it, puts it down or drops it (mdp.virtual_hand_pickup, step event).
+# While held: tracking/gait rewards are zeroed (no chasing a velocity command
+# in the air) and joint motion + leg pose deviation are penalized (go still,
+# legs in HOME). The walk anchor / stand expert skip handled frames (ring buffer,
+# see distill.py). Handled-ness is inferred by the policy from proprioception —
+# the 61D obs contract is untouched.
+ENABLE_HANDLING = True
+HANDLING_PICKUP_RATE_HZ = 0.12          # ≈ one pick-up per 8 s of upright/fallen time
+HANDLING_HOLD_S = (2.0, 5.0)
+HANDLING_LIFT_Z = (0.15, 0.30)          # above the terrain origin
+HANDLING_TILT_DEG = 15.0
+HANDLING_PUTDOWN_PROB = 0.7             # else: dropped from lift height → landing → recovery
+HANDLED_JOINT_VEL_WEIGHT = -0.3         # per rad/s mean servo speed while held
+HANDLED_POSE_WEIGHT = -1.0              # per rad mean leg deviation from HOME while held
+HANDLING_GATED_REWARDS = ("track_linear_velocity", "track_angular_velocity", "air_time")
 
 # Run-1 fix (1): smoothness taxes scaled down while fallen so get-up attempts
 # are affordable; full weight while upright (the walk's smoothness is untouched).
@@ -591,6 +624,27 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
             "crouch_prob": 0.0,       # ramped by the prone_init_prob curriculum
         },
     )
+
+    if ENABLE_HANDLING:
+        cfg.events["virtual_hand"] = EventTermCfg(
+            func=microduck_mdp.virtual_hand_pickup,
+            mode="step",
+            params={
+                "pickup_rate_hz": 0.0 if play else HANDLING_PICKUP_RATE_HZ,  # play: triggered by the eval scripts
+                "hold_s": HANDLING_HOLD_S, "lift_z": HANDLING_LIFT_Z,
+                "tilt_deg": HANDLING_TILT_DEG, "putdown_prob": HANDLING_PUTDOWN_PROB,
+                "stand_z": 0.125,
+            },
+        )
+        cfg.events["reset_virtual_hand"] = EventTermCfg(func=microduck_mdp.reset_virtual_hand, mode="reset")
+        cfg.rewards["handled_joint_vel"] = RewardTermCfg(func=microduck_mdp.handled_joint_vel_l1, weight=HANDLED_JOINT_VEL_WEIGHT)
+        cfg.rewards["handled_pose"] = RewardTermCfg(func=microduck_mdp.handled_pose_l1, weight=HANDLED_POSE_WEIGHT)
+        for name in HANDLING_GATED_REWARDS:
+            term = cfg.rewards[name]
+            cfg.rewards[name] = RewardTermCfg(
+                func=microduck_mdp.unless_handled, weight=term.weight,
+                params={"inner": f"{term.func.__module__}.{term.func.__name__}", **term.params},
+            )
 
     # Topple pushes (docstring): the velocity env's push_robot (±0.3 m/s) trains
     # stumble recovery; this one trains FALLING. Range ramped by topple_push_range.

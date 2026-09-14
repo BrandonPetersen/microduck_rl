@@ -406,3 +406,39 @@ def test_prone_spawn_adds_terrain_origin_z():
     z = env.sim.data.qpos[:, 2]
     assert torch.allclose(z, torch.tensor([0.07, 0.37, 0.19, 0.12]), atol=1e-6)
     assert (torch.rad2deg(torch.acos((1 - 2 * (env.sim.data.qpos[:, 4] ** 2 + env.sim.data.qpos[:, 5] ** 2)).clamp(-1, 1))) > 89).all()
+
+
+# ── Being handled (issue #47) ────────────────────────────────────────────────
+
+def test_handling_wiring():
+    cfg = vs.make_microduck_velstand_env_cfg()
+    if not vs.ENABLE_HANDLING:
+        pytest.skip("handling disabled")
+    assert cfg.events["virtual_hand"].mode == "step" and cfg.events["reset_virtual_hand"].mode == "reset"
+    assert cfg.events["virtual_hand"].params["pickup_rate_hz"] > 0
+    assert vs.make_microduck_velstand_env_cfg(play=True).events["virtual_hand"].params["pickup_rate_hz"] == 0.0
+    assert cfg.rewards["handled_joint_vel"].weight < 0 and cfg.rewards["handled_pose"].weight < 0  # >= 0 costs
+    for name in vs.HANDLING_GATED_REWARDS:
+        t = cfg.rewards[name]
+        assert t.func is microduck_mdp.unless_handled and "inner" in t.params
+        mod, _, fn = t.params["inner"].rpartition(".")
+        assert callable(getattr(__import__(mod, fromlist=[fn]), fn))
+    assert cfg.rewards["air_time"].weight == 3.0  # weight preserved through the gate
+
+
+def test_handled_rewards_zero_when_not_handled_and_positive_when_handled():
+    class _D:
+        joint_vel = torch.ones(2, 14); joint_pos = torch.zeros(2, 14); default_joint_pos = torch.full((2, 14), 0.5)
+    class _A:
+        data = _D(); joint_names = ["left_hip_yaw", "left_hip_roll", "left_hip_pitch", "left_knee", "left_ankle", "neck_pitch", "head_pitch", "head_yaw", "head_roll",
+                                    "right_hip_yaw", "right_hip_roll", "right_hip_pitch", "right_knee", "right_ankle"]
+        def find_joints(self, p): return list(range(14)), self.joint_names
+    class _E:
+        num_envs = 2; device = "cpu"; scene = {"robot": _A()}
+    env = _E()
+    assert (microduck_mdp.handled_joint_vel_l1(env) == 0).all()          # no hand state → not handled
+    st = microduck_mdp._hand_state(env); st["phase"][1] = 1
+    assert microduck_mdp.handled_joint_vel_l1(env).tolist() == [0.0, 1.0]
+    assert torch.allclose(microduck_mdp.handled_pose_l1(env), torch.tensor([0.0, 0.5]))
+    out = microduck_mdp.unless_handled(env, "mjlab_microduck.tasks.mdp.handled_joint_vel_l1")
+    assert out.tolist() == [0.0, 0.0]  # inner = [0, 1], zeroed on the handled env

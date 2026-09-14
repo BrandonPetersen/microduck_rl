@@ -1,5 +1,6 @@
 """MDP functions for microduck tasks"""
 
+import importlib
 import math
 import os
 from dataclasses import dataclass as _dataclass
@@ -18,7 +19,7 @@ from mjlab.tasks.velocity.mdp import observations as _velocity_obs
 from mjlab.managers.command_manager import CommandTerm
 from mjlab.managers import CommandTermCfg
 from mjlab.managers.event_manager import requires_model_fields
-from mjlab.utils.lab_api.math import matrix_from_quat, wrap_to_pi, quat_apply, quat_from_angle_axis
+from mjlab.utils.lab_api.math import matrix_from_quat, wrap_to_pi, quat_apply, quat_from_angle_axis, quat_mul, quat_inv, axis_angle_from_quat, quat_from_euler_xyz, yaw_quat
 from rsl_rl.algorithms.ppo import PPO as _PPO
 
 # ---------------------------------------------------------------------------
@@ -820,6 +821,178 @@ def joint_torque_rate_l2_fallen_scaled(
     """joint_torque_rate_l2 × ``fallen_scale`` while fallen (see action_rate_l2_fallen_scaled)."""
     asset: Entity = env.scene[asset_cfg.name]
     return joint_torque_rate_l2(env, asset_cfg) * _fallen_scale(env, asset, fallen_scale, gate_tilt_above_deg)
+
+
+# ── VelStand: being handled (GitHub issue #47) ────────────────────────────────
+# A human picks the robot up, carries it, tilts it, puts it down or drops it.
+# Every policy must go STILL while handled instead of running in the air, and
+# recover after the release (the protective-fall stack already owns that part).
+# The "hand" is a spring-damper wrench on the trunk (mjlab step event, world
+# frame, persists until the next write) driving a target pose that lifts,
+# drifts, yaws and tilts, then either lowers to standing height (put-down) or
+# lets go (drop). Handled-ness is NOT observable directly (61D obs contract is
+# untouched): the policy has to infer it from proprioception (unloaded legs
+# track their targets exactly, gravity direction wanders, no touchdowns).
+# State lives on env._hand (dict of tensors); rewards read handled_mask(env).
+
+def _hand_state(env: ManagerBasedRlEnv) -> dict:
+    st = getattr(env, "_hand", None)
+    if st is None or st["phase"].shape[0] != env.num_envs:
+        N, d = env.num_envs, env.device
+        st = dict(phase=torch.zeros(N, dtype=torch.long, device=d), t=torch.zeros(N, device=d), t_hold=torch.zeros(N, device=d),
+                  pos=torch.zeros(N, 3, device=d), yaw=torch.zeros(N, device=d), tilt=torch.zeros(N, 2, device=d),
+                  drift=torch.zeros(N, 3, device=d), yaw_rate=torch.zeros(N, device=d), drop=torch.zeros(N, dtype=torch.bool, device=d),
+                  z_release=torch.zeros(N, device=d), z0=torch.zeros(N, device=d), count=torch.zeros(N, device=d))
+        env._hand = st
+    return st
+
+
+def handled_mask(env: ManagerBasedRlEnv) -> torch.Tensor:
+    """(N,) bool — True while the virtual hand holds the robot (lifting/holding/lowering)."""
+    st = getattr(env, "_hand", None)
+    if st is None:
+        return torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    return st["phase"] > 0
+
+
+def _yaw_of(q: torch.Tensor) -> torch.Tensor:
+    w, x, y, z = q.unbind(-1)
+    return torch.atan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def virtual_hand_pickup(
+    env: ManagerBasedRlEnv,
+    env_ids: torch.Tensor | None = None,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    pickup_rate_hz: float = 0.12,
+    min_episode_s: float = 1.0,
+    hold_s: tuple[float, float] = (2.0, 5.0),
+    lift_z: tuple[float, float] = (0.15, 0.30),
+    lift_s: float = 0.8,
+    drift_speed: tuple[float, float] = (0.0, 0.15),
+    yaw_rate: tuple[float, float] = (-0.6, 0.6),
+    tilt_deg: float = 15.0,
+    putdown_prob: float = 0.7,
+    lower_s: float = 1.2,
+    stand_z: float = 0.125,
+    mass_kg: float = 0.74,
+    kp: float = 80.0,
+    kd: float = 10.0,
+    kp_rot: float = 2.5,     # first check: 0.6 let the flailing legs tilt the held robot to ~30° (gates at 35/40°)
+    kd_rot: float = 0.2,
+    max_force: float = 25.0,
+    max_torque: float = 2.5,
+    pickup_fallen: bool = True,
+) -> None:
+    """Step event: the virtual hand. Idle envs start a pick-up with probability
+    pickup_rate_hz·dt per step (after ``min_episode_s``; fallen robots too if
+    ``pickup_fallen`` — a human picks up a fallen robot and sets it on its
+    feet). Held: the target rises ``lift_z`` above the terrain origin over
+    ``lift_s``, then drifts/yaws/tilts for ``hold_s``. End: with
+    ``putdown_prob`` the target lowers to ``stand_z`` over ``lower_s`` and the
+    hand lets go (put-down), else it lets go at height (drop → landing →
+    recovery). Wrench = PD on trunk pose + gravity compensation, clamped.
+    Writes the wrench for ALL envs every step (zeros when idle) — xfrc persists
+    otherwise. Also logs handled flags into env._handled_ring when the
+    algorithm has attached one (walk-anchor exclusion, see distill.py)."""
+    del env_ids
+    asset: Entity = env.scene[asset_cfg.name]
+    st = _hand_state(env); dt = float(env.step_dt); N = env.num_envs; d = env.device
+    if "bid" not in st:
+        st["bid"] = int(asset.find_bodies("trunk_base")[0][0])
+    pos = asset.data.root_link_pos_w; quat = asset.data.root_link_quat_w
+    vel = torch.nan_to_num(asset.data.root_link_lin_vel_w, nan=0.0); angv = torch.nan_to_num(asset.data.root_link_ang_vel_w, nan=0.0)
+    origin_z = env.scene.env_origins[:, 2]
+    R22 = 1.0 - 2.0 * (quat[:, 1] ** 2 + quat[:, 2] ** 2)
+    ep_t = env.episode_length_buf.float() * dt if hasattr(env, "episode_length_buf") else torch.full((N,), 1e9, device=d)
+
+    # ── start pick-ups ──────────────────────────────────────────────────────
+    idle = st["phase"] == 0
+    eligible = idle & (ep_t >= min_episode_s) & (pickup_fallen | (R22 > 0.0))
+    start = eligible & (torch.rand(N, device=d) < pickup_rate_hz * dt)
+    if start.any():
+        n = int(start.sum())
+        st["phase"][start] = 1; st["t"][start] = 0.0; st["count"][start] += 1
+        st["t_hold"][start] = torch.empty(n, device=d).uniform_(*hold_s)
+        st["z0"][start] = pos[start, 2]
+        st["pos"][start] = pos[start]; st["pos"][start, 2] = origin_z[start] + torch.empty(n, device=d).uniform_(*lift_z)
+        st["yaw"][start] = _yaw_of(quat[start])
+        st["tilt"][start] = torch.empty(n, 2, device=d).uniform_(-math.radians(tilt_deg), math.radians(tilt_deg))
+        ang = torch.empty(n, device=d).uniform_(0, 2 * math.pi); sp = torch.empty(n, device=d).uniform_(*drift_speed)
+        st["drift"][start] = torch.stack([sp * torch.cos(ang), sp * torch.sin(ang), torch.zeros(n, device=d)], dim=1)
+        st["yaw_rate"][start] = torch.empty(n, device=d).uniform_(*yaw_rate)
+        st["drop"][start] = torch.rand(n, device=d) >= putdown_prob
+        st["z_release"][start] = origin_z[start] + stand_z
+
+    # ── advance held / lowering ─────────────────────────────────────────────
+    held = st["phase"] == 1; lowering = st["phase"] == 2
+    st["t"] += dt
+    st["pos"][:, :2] += torch.where((held | lowering).unsqueeze(1), st["drift"][:, :2] * dt, torch.zeros(N, 2, device=d))
+    st["yaw"] += torch.where(held, st["yaw_rate"] * dt, torch.zeros(N, device=d))
+    done_hold = held & (st["t"] >= st["t_hold"])
+    if done_hold.any():
+        drop = done_hold & st["drop"]; put = done_hold & ~st["drop"]
+        st["phase"][drop] = 0                       # let go at height
+        st["phase"][put] = 2; st["t"][put] = 0.0; st["z0"][put] = st["pos"][put, 2]; st["tilt"][put] = 0.0
+    lowering = st["phase"] == 2
+    done_lower = lowering & (st["t"] >= lower_s)
+    st["phase"][done_lower] = 0
+    active = st["phase"] > 0
+
+    # ── target pose ─────────────────────────────────────────────────────────
+    tgt = st["pos"].clone()
+    lift_a = (st["t"] / lift_s).clamp(0.0, 1.0)
+    tgt[:, 2] = torch.where(st["phase"] == 1, st["z0"] + lift_a * (st["pos"][:, 2] - st["z0"]), tgt[:, 2])
+    low_a = (st["t"] / lower_s).clamp(0.0, 1.0)
+    tgt[:, 2] = torch.where(st["phase"] == 2, st["z0"] + low_a * (st["z_release"] - st["z0"]), tgt[:, 2])
+    q_tgt = quat_from_euler_xyz(st["tilt"][:, 0], st["tilt"][:, 1], st["yaw"])
+
+    # ── wrench ──────────────────────────────────────────────────────────────
+    F = kp * (tgt - pos) - kd * vel
+    F[:, 2] += mass_kg * 9.81
+    F = F * (max_force / F.norm(dim=1, keepdim=True).clamp_min(max_force))
+    q_err = quat_mul(q_tgt, quat_inv(quat))
+    rot_err = axis_angle_from_quat(q_err)
+    T = kp_rot * rot_err - kd_rot * angv
+    T = T * (max_torque / T.norm(dim=1, keepdim=True).clamp_min(max_torque))
+    F = torch.where(active.unsqueeze(1), F, torch.zeros_like(F)); T = torch.where(active.unsqueeze(1), T, torch.zeros_like(T))
+    asset.write_external_wrench_to_sim(forces=F.unsqueeze(1), torques=T.unsqueeze(1), body_ids=[st["bid"]])
+
+    ring = getattr(env, "_handled_ring", None)
+    if ring is not None and hasattr(env, "common_step_counter"):
+        ring[(env.common_step_counter - 1) % ring.shape[0]] = active
+
+
+def reset_virtual_hand(env: ManagerBasedRlEnv, env_ids: torch.Tensor, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> None:
+    """Reset event: release the hand on resetting envs (their wrench is zeroed at the next step write)."""
+    st = _hand_state(env)
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+    st["phase"][env_ids] = 0; st["t"][env_ids] = 0.0
+
+
+def handled_joint_vel_l1(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+    """Mean |servo joint velocity| while handled, 0 otherwise (>= 0 → negative weight): no running in the air."""
+    asset: Entity = env.scene[asset_cfg.name]
+    v = torch.nan_to_num(_servo_joint_vel(env, asset), nan=0.0).abs().mean(dim=1)
+    return v * handled_mask(env).float()
+
+
+def handled_pose_l1(env: ManagerBasedRlEnv, asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG) -> torch.Tensor:
+    """Mean |q - default| over the LEG servos while handled (>= 0 → negative weight): legs hang in the HOME pose."""
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = _servo_joint_ids(env, asset)
+    legs = [k for k, i in enumerate(ids) if "hip" in asset.joint_names[i] or "knee" in asset.joint_names[i] or "ankle" in asset.joint_names[i]]
+    dq = (_servo_joint_pos(env, asset) - _servo_default_joint_pos(env, asset)).abs()[:, legs].mean(dim=1)
+    return torch.nan_to_num(dq, nan=0.0) * handled_mask(env).float()
+
+
+def unless_handled(env: ManagerBasedRlEnv, inner: str, **kwargs) -> torch.Tensor:
+    """Run reward ``inner`` (dotted path) and zero it while handled — tracking
+    and gait rewards must not pay for chasing a velocity command in the air."""
+    mod, _, fn = inner.rpartition(".")
+    f = getattr(importlib.import_module(mod), fn)
+    return f(env, **kwargs) * (~handled_mask(env)).float()
 
 
 def body_upright_linear(

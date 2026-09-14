@@ -128,11 +128,25 @@ def _resolve_checkpoint(bc_cfg: dict, prefix: str = "") -> Path | None:
 
 
 class PpoWithExpertBc(PPO):
+    @staticmethod
+    def construct_algorithm(obs, env, cfg, device):
+        alg = PPO.construct_algorithm(obs, env, cfg, device)
+        # Handled-frame exclusion (issue #47): the virtual-hand step event logs a
+        # per-step "held" flag into this ring, aligned with the rollout storage
+        # ([T, N], T = num_steps_per_env), so the walk anchor never teaches
+        # "walk in the air" and the stand expert never teaches "get up" mid-air.
+        if isinstance(alg, PpoWithExpertBc) and alg.expert is not None:
+            u = getattr(env, "unwrapped", env)
+            alg._env_unwrapped = u
+            u._handled_ring = torch.zeros(alg.storage.num_transitions_per_env, env.num_envs, dtype=torch.bool, device=device)
+        return alg
+
     def __init__(self, actor, critic, storage, *args, bc_cfg: dict | None = None, **kwargs) -> None:
         super().__init__(actor, critic, storage, *args, **kwargs)
         self.bc_cfg = bc_cfg
         self.expert = None
         self.anchor = None
+        self._env_unwrapped = None
         if bc_cfg:
             ckpt = torch.load(_resolve_checkpoint(bc_cfg), map_location=self.device, weights_only=False)
             self.expert = load_expert_from(self.actor, ckpt["actor_state_dict"]).to(self.device)
@@ -160,7 +174,19 @@ class PpoWithExpertBc(PPO):
         gsl = tuple(cfg["gravity_slice"])
         fallen = fallen_mask_from_obs(flat, gsl, cfg["gate_tilt_deg"])
         upright = ~fallen_mask_from_obs(flat, gsl, cfg["anchor_tilt_deg"]) if self.anchor is not None else torch.zeros_like(fallen)
-        stats = {"expert_bc_fallen_frac": fallen.float().mean().item(), "expert_bc_anchor_frac": upright.float().mean().item()}
+        u = self._env_unwrapped
+        ring = getattr(u, "_handled_ring", None) if u is not None else None
+        if ring is not None:
+            T = ring.shape[0]
+            if getattr(u, "common_step_counter", 0) % T == 0:  # storage slot s ↔ ring row s
+                handled = ring.flatten()
+                fallen = fallen & ~handled; upright = upright & ~handled
+                stats_handled = handled.float().mean().item()
+            else:
+                stats_handled = float("nan")  # misaligned (should not happen): no exclusion this update
+        else:
+            stats_handled = 0.0
+        stats = {"expert_bc_fallen_frac": fallen.float().mean().item(), "expert_bc_anchor_frac": upright.float().mean().item(), "expert_bc_handled_frac": stats_handled}
         if fallen.sum().item() < cfg["min_samples"]:
             fallen = torch.zeros_like(fallen)  # too few fallen frames: anchor-only pass (or nothing)
         use = fallen | upright
