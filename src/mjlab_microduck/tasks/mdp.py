@@ -4728,8 +4728,7 @@ class VelocityCommandCommandOnly(UniformVelocityCommand):
         maxr = max(abs(lo), abs(hi))
         rr = torch.empty(len(turn_ids), device=self.device)
         sign = torch.where(rr.uniform_(0.0, 1.0) < 0.5, -1.0, 1.0)
-        lo_frac = getattr(self.cfg, "turn_in_place_min_frac", 0.4)
-        mag = torch.empty(len(turn_ids), device=self.device).uniform_(lo_frac * maxr, maxr)
+        mag = torch.empty(len(turn_ids), device=self.device).uniform_(0.4 * maxr, maxr)
         self.vel_command_b[turn_ids, 2] = sign * mag
         # These envs must actually turn — un-mark them as standing (which would
         # zero the command) and refresh the world-frame reference copy.
@@ -4770,15 +4769,8 @@ class VelocityCommandCommandOnly(UniformVelocityCommand):
 @_dataclass(kw_only=True)
 class VelocityCommandCommandOnlyCfg(UniformVelocityCommandCfg):
     # Fraction of envs commanded to turn in place (lin=0, |ang| forced to
-    # [turn_in_place_min_frac·max, max]) each resample. 0 = disabled (base uniform sampling only).
+    # [0.4·max, max]) each resample. 0 = disabled (base uniform sampling only).
     rel_turn_in_place_envs: float = 0.0
-    # Lower bound of the forced yaw magnitude, as a fraction of the range max.
-    # 0.4 (the historical value) leaves a DEAD ZONE: with lin=0 the policy never
-    # sees |wz| < 0.4 rad/s (standing envs zero the whole command, uniform
-    # sampling never hits lin=0), so the deployed walk stands still for yaw
-    # commands of 0.3-0.6 rad/s and only turns, in bursts, at 1.0 (measured
-    # 2026-09-14, velstand_turn_diag.py). VelStand lowers it to 0.1.
-    turn_in_place_min_frac: float = 0.4
 
     def build(self, env: ManagerBasedRlEnv) -> "VelocityCommandCommandOnly":
         return VelocityCommandCommandOnly(self, env)

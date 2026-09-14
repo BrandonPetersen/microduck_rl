@@ -370,37 +370,6 @@ def test_reference_recipe_constants():
     assert p.get("joint_random_prob", 0.0) == 0.0  # post-fall-like spawns OFF in the reference recipe
 
 
-def test_turn_in_place_fix():
-    cfg = vs.make_microduck_velstand_env_cfg()
-    tw = cfg.commands["twist"]
-    if vs.ENABLE_TURN_FIX:
-        assert tw.turn_in_place_min_frac <= 0.15 and tw.rel_turn_in_place_envs >= 0.2
-        assert cfg.rewards["track_angular_velocity"].params["std"] <= 0.5
-        assert 0.1 <= vs.MicroduckVelStandRlCfg.algorithm.bc_cfg["anchor_coef"] < 1.0
-    # velocity recipe untouched
-    from mjlab_microduck.tasks.microduck_velocity_env_cfg import make_microduck_velocity_env_cfg
-    v = make_microduck_velocity_env_cfg().commands["twist"]
-    assert v.rel_turn_in_place_envs == 0.15 and getattr(v, "turn_in_place_min_frac", 0.4) == 0.4
-
-
-def test_turn_bucket_samples_small_yaw(monkeypatch):
-    """The forced-yaw magnitude must reach down to min_frac·max (dead-zone fix)."""
-    from mjlab_microduck.tasks import mdp as m
-    class _Cfg:
-        rel_turn_in_place_envs = 1.0; turn_in_place_min_frac = 0.1
-        class ranges: ang_vel_z = (-1.0, 1.0)
-    class _Obj(m.VelocityCommandCommandOnly):  # bypass __init__ (needs an env) and the read-only device property
-        def __init__(self): pass
-        device = "cpu"
-    obj = _Obj(); obj.cfg = _Cfg(); obj.vel_command_b = torch.zeros(2000, 3); obj.vel_command_w = torch.zeros(2000, 3)
-    obj.is_standing_env = torch.ones(2000, dtype=torch.bool)
-    monkeypatch.setattr(m.UniformVelocityCommand, "_resample_command", lambda self, ids: None, raising=False)
-    obj._resample_command(torch.arange(2000))
-    mag = obj.vel_command_b[:, 2].abs()
-    assert mag.min() >= 0.1 - 1e-6 and mag.min() < 0.2 and mag.max() <= 1.0 + 1e-6
-    assert (obj.vel_command_b[:, :2] == 0).all() and not obj.is_standing_env.any()
-
-
 def test_randomize_servo_joints_uniform_respects_limits(monkeypatch):
     lo = torch.tensor([-1.0] * 14); hi = torch.tensor([1.0] * 14); hi[7] = 3.0; lo[7] = -3.0
     written = {}

@@ -293,21 +293,6 @@ ENABLE_EXPERT_BC = True
 EXPERT_BC_COEF = 1.0
 EXPERT_BC_GATE_TILT_DEG = 35.0
 
-# Turn-in-place fix (2026-09-14). Measured on the walk expert AND velstand 5999
-# (claude_experiments/velstand_turn_diag.py): yaw cmd 0.3 → 0.00 rad/s, 0.6 →
-# 0.02-0.08, 1.0 → 0.35 in bursts. A dead zone inherited from the walk recipe:
-# the turn bucket only samples |wz| ∈ [0.4, 1.0], and the angular tracking std
-# (√0.5 = 0.71) prices a 0.3 rad/s error at only 17% of the term. Fixes, scoped
-# to velstand so the walk recipe is untouched: bucket from 0.1·max, bigger
-# bucket, tighter yaw std, and the walk anchor loosened so PPO CAN move the
-# upright behaviour (at 1.0 the anchor pins turning to the expert's dead zone).
-ENABLE_TURN_FIX = True
-TURN_IN_PLACE_FRACTION_VELSTAND = 0.25   # velocity recipe: 0.15
-TURN_IN_PLACE_MIN_FRAC = 0.1             # velocity recipe: 0.4
-TRACK_ANG_VEL_STD = 0.45                 # velocity recipe: sqrt(0.5) = 0.71
-TRACK_ANG_VEL_WEIGHT = 2.5               # velocity recipe: 2.0
-WALK_ANCHOR_COEF = 0.3                   # reference recipe: 1.0 — needed for the turn to move; watch track_linear_velocity
-
 # Run-1 fix (1): smoothness taxes scaled down while fallen so get-up attempts
 # are affordable; full weight while upright (the walk's smoothness is untouched).
 FALLEN_SMOOTHNESS_SCALE = 0.1
@@ -397,12 +382,6 @@ def make_microduck_velstand_env_cfg(play: bool = False, rough: bool = False) -> 
     # below never fires — just delete the termination outright.
     if play:
         cfg.terminations.pop("fell_over", None)
-
-    if ENABLE_TURN_FIX:
-        cfg.commands["twist"].rel_turn_in_place_envs = TURN_IN_PLACE_FRACTION_VELSTAND
-        cfg.commands["twist"].turn_in_place_min_frac = TURN_IN_PLACE_MIN_FRAC
-        cfg.rewards["track_angular_velocity"].params["std"] = TRACK_ANG_VEL_STD
-        cfg.rewards["track_angular_velocity"].weight = TRACK_ANG_VEL_WEIGHT
 
     # Warm start: pin the inherited velocity curricula at their final stage
     # BEFORE adding velstand's own (which must still ramp).
@@ -752,8 +731,7 @@ MicroduckVelStandRlCfg = RslRlOnPolicyRunnerCfg(
         desired_kl=0.01,
         max_grad_norm=1.0,
         symmetry_cfg=None,
-        bc_cfg={**default_bc_cfg(), "coef": EXPERT_BC_COEF, "gate_tilt_deg": EXPERT_BC_GATE_TILT_DEG,
-                "anchor_coef": WALK_ANCHOR_COEF if ENABLE_TURN_FIX else 1.0} if ENABLE_EXPERT_BC else None,
+        bc_cfg={**default_bc_cfg(), "coef": EXPERT_BC_COEF, "gate_tilt_deg": EXPERT_BC_GATE_TILT_DEG} if ENABLE_EXPERT_BC else None,
     ),
     wandb_project="mjlab_microduck",
     experiment_name="velstand",
