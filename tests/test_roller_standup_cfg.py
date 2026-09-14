@@ -54,12 +54,70 @@ def test_smoothness_regularisers_kept():
         "body_ang_vel",
         "angular_momentum",
         "action_rate_l2",
-        "neck_action_rate_l2",
         "neck_joint_pos_l2",
         "joint_torques_l2",
     ):
         assert name in cfg.rewards, f"régularisateur perdu : {name}"
     assert cfg.rewards["body_ang_vel"].weight == -0.05
+
+
+def test_neck_action_rate_is_dropped_but_neck_position_is_kept():
+    """Les deux termes de cou tirent en sens OPPOSÉS — un seul doit partir.
+
+    neck_action_rate_l2 taxe le MOUVEMENT de la tête : double-taxe des 4 joints
+    déjà couverts par action_rate_l2 (poids effectif 0.6 contre 0.1 par joint de
+    jambe au palier 0), mesuré à -1.359/pas sur le smoke, plus gros terme de
+    toute la récompense. C'est une taxe sur les tentatives pendant la découverte,
+    et la recette de référence la jette (microduck_standup_env_cfg.py:485).
+
+    neck_joint_pos_l2 taxe la tête LOIN DU NEUTRE : c'est ce qui combat le
+    trépied sur la tête. Il reste.
+
+    Le piège que ce test verrouille : « retirer la pénalité de cou » sans
+    préciser laquelle.
+    """
+    cfg = make_microduck_roller_standup_env_cfg()
+    assert "neck_action_rate_l2" not in cfg.rewards
+    assert "neck_joint_pos_l2" in cfg.rewards
+    assert cfg.rewards["neck_joint_pos_l2"].weight == -0.5
+
+
+def test_action_over_limit_is_kept():
+    """Garde-fou sim2real, pas une taxe sur le mouvement.
+
+    Il pénalise les commandes hors ctrlrange — une pathologie précise — et c'est
+    la protection côté policy de la famille roller. Le retirer en même temps que
+    neck_action_rate_l2 serait un risque de transfert sans bénéfice mesuré.
+    """
+    cfg = make_microduck_roller_standup_env_cfg()
+    assert cfg.rewards["action_over_limit"].weight == -0.5
+
+
+def test_face_up_spawns_get_roll_noise():
+    """Reverse-curriculum intégré sur le cas dur.
+
+    Sans ce paramètre (défaut 0.0), TOUS les départs sur le dos sont à plat — le
+    cas dont le marcheur documente que le paysage de récompense est plat jusqu'à
+    la fin du roulé, donc que la réussite est « seed-lucky » (1 succès / 3
+    échecs). Le bruit de roulis fait commencer une fraction des épisodes à
+    mi-roulé, ce qui donne enfin de la donnée on-policy à la fin du geste.
+    """
+    import math
+
+    cfg = make_microduck_roller_standup_env_cfg()
+    assert cfg.events["set_ground_state"].params["face_up_roll_max"] == pytest.approx(
+        math.radians(90)
+    )
+
+
+def test_backlash_variant_keeps_the_spawn_roll_noise():
+    import math
+
+    bl = _load("Mjlab-RollerStandUp-Flat-Backlash-MicroDuck")
+    assert bl.events["set_ground_state"].params["face_up_roll_max"] == pytest.approx(
+        math.radians(90)
+    )
+    assert "neck_action_rate_l2" not in bl.rewards
 
 
 def test_twist_command_is_neutralised():

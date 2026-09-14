@@ -190,6 +190,32 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
     for name in _SKATING_REWARDS:
         cfg.rewards.pop(name, None)
 
+    # ── Taxe sur les tentatives : retirée, comme dans la recette de référence ─
+    # neck_action_rate_l2 (-0.5) taxe le MOUVEMENT de la tête. Les 4 joints de
+    # tête sont déjà couverts par action_rate_l2, donc ce terme les DOUBLE-taxe :
+    # poids effectif par joint de tête 0.6 contre 0.1 pour un joint de jambe au
+    # palier 0, soit 6x au moment précis de la découverte.
+    #
+    # Mesuré sur le smoke (policy qui bouge) : -1.359/pas, le plus gros terme de
+    # toute la récompense, ~1.9x le bloc de tâche positif entier. Le calcul que
+    # fait alors la policy depuis le ventre : rester immobile ≈ -0.39/pas, bouger
+    # ≈ -4.2/pas. Ne rien faire gagne d'un facteur 10 — la loi d'AGENTS.md sur
+    # les taxes de tentative pendant la découverte, en chiffres.
+    #
+    # Le standup du marcheur le JETTE explicitement (microduck_standup_env_cfg.py
+    # :485, « microduck-only extras DROPPED, like velocity drops them »). Il
+    # arrivait ici par héritage de la recette de PATINAGE, où une tête calme sert
+    # un gait ; il n'a jamais été audité pour un relevé.
+    #
+    # ⚠️ NE PAS confondre avec neck_joint_pos_l2 (-0.5), gardé : celui-là taxe la
+    # tête LOIN DU NEUTRE, donc il combat le trépied. Les deux termes tirent en
+    # sens opposés et c'est celui du RATE qui est la taxe.
+    #
+    # action_over_limit (-0.5) est gardé aussi : il pénalise les commandes hors
+    # ctrlrange, une pathologie précise et le garde-fou sim2real côté policy de la
+    # famille roller — pas une taxe sur le mouvement.
+    cfg.rewards.pop("neck_action_rate_l2", None)
+
     # ── Commande : slot twist neutralisé (≈ 0) ───────────────────────────────
     # L'env roller installe un RelativeHeadingVelocityCommandCfg (cmd[2] = erreur
     # de cap calculée en interne). Ici on ne pilote rien : on repasse au
@@ -491,6 +517,32 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
             # du bucket « assis », donc ce bruit s'applique AUSSI aux départs
             # debout — c'est voulu (pas de sur-apprentissage du parfaitement droit).
             "sitting_tilt_max": math.radians(10),
+            # ── Reverse-curriculum intégré sur les départs sur le dos ─────────
+            # Bruit de roulis (± 90° autour de l'axe LONG du corps) appliqué au
+            # seul bucket face_up. Ce paramètre manquait — il valait donc 0, et
+            # TOUS les départs sur le dos étaient parfaitement à plat.
+            #
+            # C'est le cas que le marcheur documente comme sans issue : entre le
+            # dos à plat et le ventre, le paysage de récompense est PLAT —
+            # upright_linear (cos tilt) reste ≈ 0 pendant tout le roulé et la
+            # hauteur ne change pas — donc rouler ne paie que via la montée
+            # frontale qui suit, une dépendance à long horizon que l'exploration
+            # bruitée ne trouve quasiment jamais depuis un dos à plat. Son
+            # verdict : back-recovery « seed-lucky », 1 succès pour 3 échecs à
+            # récompenses équivalentes.
+            #
+            # Avec le bruit, une fraction des départs commence presque sur le
+            # côté, donc à mi-roulé : la policy apprend la FIN du geste sur des
+            # départs faciles puis généralise vers le dos à plat. Reverse
+            # curriculum intégré, sans palier à régler — l'échantillonnage
+            # uniforme garde toutes les difficultés représentées en permanence
+            # (dos quasi plat, |roll| < 15°, ≈ 17 % des tirages à ±90°).
+            #
+            # Interaction avec prone_z_min=0.076 : un départ sur le côté repose
+            # plus bas qu'un dos à plat, donc il tombe de quelques mm au spawn.
+            # C'est le sens sûr de l'erreur (une chute, pas une interpénétration,
+            # qui est ce que prone_z_min=0.076 sert justement à éviter).
+            "face_up_roll_max": math.radians(90),
         },
     )
 

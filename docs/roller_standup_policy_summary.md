@@ -253,3 +253,103 @@ attribué avec certitude. Une correction à la fois.
 Intégrer le relevé dans la policy de roulage (recette `velstand`) ; buckets de départ sur le côté ; variante rough ; pénalités d'impact tronc/tête.
 
 Aucune récompense ne pénalise la vitesse horizontale du tronc (`root_link_lin_vel_w[:, :2]`) : « se relever en roulant loin » est un résultat non pénalisé et qui score à plein. Décision volontaire (pas un oubli) : une récompense d'immobilité qui ne serait pas gatée en hauteur pénaliserait aussi la translation que le relevé depuis le sol exige physiquement — le mode d'échec « bloqueur de mouvement » que le `standup` documente. Candidat si le problème se confirme : une immobilité gatée en hauteur (proche de `ROLLER_STAND_Z` seulement).
+
+---
+
+## 🔴 Run `fmt83tri` — le trépied sur la tête, et ce que le portage avait perdu
+
+Premier run de la recette resynchronisée (4096 envs, 6000 it.). **Échec, diagnostiqué.**
+
+### Ce que la policy faisait
+
+Un **trépied sur la tête** : tête plantée au sol, tronc levé à la hauteur de station
+avec ~55° d'inclinaison, jambes laissées à HOME. Vérifié à l'œil sur `model_500` comme sur
+`model_3500` — **il n'y a jamais eu de relevé**, à aucun stade.
+
+Pourquoi ça payait, mesuré par pas à l'itération 3625 :
+
+| terme | valeur | max | % |
+|---|---|---|---|
+| `pose_stand_legs` | 1.991 | 2.00 | **99.5 %** (plat depuis l'iter 250) |
+| `height_stand_sharp` | 0.505 | 1.00 | 50 % |
+| `upright_linear` | 0.852 | 1.50 | 57 % → cos(tilt) 0.57 → **55°** |
+| `standing_composite` | 0.915 | 3.75 | 24 % |
+| **total positif** | **5.16** | **10.75** | **48 %** |
+
+Garder 48 % du stack sans jamais se relever = l'audit d'AGENTS.md qui échoue. Le composite
+multiplicatif s'effondrait bien sur la verticalité, mais il ne pèse que 3.75 d'une masse
+positive de 10.75 : **un score multiplicatif ne casse pas un compromis que le reste de la
+pile finance.**
+
+### Le tell dans les courbes
+
+`standing_composite / max` suivait `standing_prob` à +0.05 près, à tous les paliers
+(0.50→0.59, 0.35→0.40, 0.25→0.27, 0.20→0.24). Autrement dit **toute la récompense de station
+venait des envs spawnés déjà debout**. Les trois « décrochages » à 625 / 1625 / 2625 n'étaient
+pas une compétence qui se dégrade : c'était le seul bucket payant qui rétrécissait.
+
+⚠️ Le `standup` du marcheur décrit **exactement cette signature** pour ses deux runs cassés de
+2026-07-24 : *« standing metrics drop at the ground_state_mix stages instead of recovering like
+the reference run »*. Cet env avait reproduit les runs cassés du marcheur, pas celui qui marche.
+
+### Correctif 1 — porte d'appui (`wheel_support_gate`)
+
+`standing_composite` et `pose_stand_legs` passent par leurs variantes `*_on_wheels` :
+multipliées par une porte binaire qui vaut 1 **seulement si le robot est porté par ses roues
+seules** (un pneu suffit ; tête ou tronc au sol ferment). Une porte, pas une pénalité : une
+pénalité se négocie (« la tête me coûte 1.0 mais me rapporte 2.9 »), zéro fois quelque chose
+ne se négocie pas.
+
+**La mise en forme de la MONTÉE reste non gatée** (`height_stand`, `height_stand_l1`,
+`upright_linear`) — sinon plus rien ne tire le robot hors du sol. Verrouillé par
+`test_climb_shaping_stays_ungated`.
+
+Nouveaux capteurs : `head_ground_contact` (`jaw_soft`) et `trunk_ground_contact`
+(`trunk_base`, **`mode="body"` et pas `"subtree"`** — le sous-arbre contient les pneus, la
+porte resterait fermée debout).
+
+### Correctif 2 — `neck_action_rate_l2` retiré
+
+Après la porte, la policy s'est **figée** depuis le ventre (observé à l'iter 500). Ce n'était
+pas une régression : la porte avait supprimé le trépied, seul comportement que la policy ait
+jamais trouvé, et il n'y avait rien d'autre à portée d'exploration.
+
+Le calcul qu'elle faisait alors, depuis le ventre : **rester immobile ≈ −0.39/pas, bouger
+≈ −4.2/pas.** Ne rien faire gagnait d'un facteur 10.
+
+`neck_action_rate_l2` (−0.5) en était le premier poste : mesuré **−1.359/pas**, plus gros terme
+de toute la récompense, ~1.9× le bloc de tâche positif. Il **double-taxe** les 4 joints de tête,
+déjà couverts par `action_rate_l2` (poids effectif 0.6 contre 0.1 par joint de jambe au palier 0).
+Il arrivait par héritage de la recette de **patinage** et n'avait jamais été audité pour un relevé.
+Le `standup` du marcheur le jette explicitement (`microduck_standup_env_cfg.py:485`).
+
+⚠️ **Les deux termes de cou tirent en sens opposés.** `neck_joint_pos_l2` (−0.5, tête loin du
+neutre) combat le trépied → **gardé**. `action_over_limit` (−0.5) est gardé aussi : il pénalise
+les commandes hors `ctrlrange`, pas le mouvement. Verrouillé par
+`test_neck_action_rate_is_dropped_but_neck_position_is_kept`.
+
+### Correctif 3 — `face_up_roll_max = 90°`
+
+**Le paramètre manquait**, donc il valait 0 : tous les départs sur le dos étaient parfaitement
+à plat. Or le marcheur documente ce cas comme sans issue — *« back-recovery was seed-lucky
+(1 success / 3 failures) because the reward landscape from flat supine to prone is FLAT »*.
+
+Mesuré ici sur 256 spawns : **le tilt vaut 90.0° pour tous, quel que soit le roulis** — rouler
+autour de l'axe long ne change pas l'écart à la verticale, donc `upright_linear` reste à ≈ 0
+pendant tout le geste. Confirmation directe qu'aucun gradient ne guide le roulé.
+
+Le bruit de roulis fait démarrer une fraction des épisodes **à mi-roulé** : reverse curriculum
+intégré, sans palier à régler. Vérifié sans pénétration au spawn (0/256 sous le sol) ; chute
+médiane de 42 mm au reset, artefact connu du plancher `prone_z` partagé entre dos et ventre.
+
+### ✅ Résultat mesuré : les roues ne sont PAS le point dur
+
+Aux trois paliers du curriculum de friction (1000 / 2000 / 3000, soit 0.05 → 0.003, un facteur
+17), `standing_composite` **ne baisse pas** — à 2000 et 3000 elle monte même juste après. Les
+deux curricula tombent sur des itérations différentes (600/1500/2500 contre 1000/2000/3000),
+donc l'attribution est propre.
+
+**L'hypothèse fondatrice de cet env est infirmée.** Le geste ne bute pas sur l'absence
+d'adhérence longitudinale. Conséquence de calendrier : le curriculum de friction dépense
+4000 itérations sur un faux problème, et c'est lui qui repousse l'anti-violence à 3000.
+Candidat à compresser une fois le relevé acquis.
