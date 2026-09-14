@@ -353,3 +353,52 @@ donc l'attribution est propre.
 d'adhérence longitudinale. Conséquence de calendrier : le curriculum de friction dépense
 4000 itérations sur un faux problème, et c'est lui qui repousse l'anti-violence à 3000.
 Candidat à compresser une fois le relevé acquis.
+
+### 🐛 Fuite de la porte v1 — hanches et tibias
+
+Premier run gaté : `pose_stand_legs / 1.9 = 0.67` alors que `standing_prob = 0.50`, lu à tort
+comme « un tiers des départs ventre se relèvent ». **La vidéo disait le contraire** : robot
+vautré, immobile.
+
+Cause : le modèle rollers n'a que **12 géoms de collision** —
+
+```
+trunk_base  np_f970 (batterie, à l'arrière)     hip_l, hip_l_2   hip
+jaw_soft    top_head_shell, jaw, bottom_head    leg, leg_2       leg
+tire ×4
+```
+
+**Les coques du tronc sont VISUELLES.** Un robot vautré reposant sur ses hanches et ses
+tibias, un pneu frôlant le sol et la tête relevée, ne déclenchait donc ni
+`head_ground_contact` ni `trunk_ground_contact` : la porte s'ouvrait à plat par terre.
+
+Correctif : troisième capteur `limbs_ground_contact` (`^(hip_l|hip_l_2|leg|leg_2)$`). « Porte
+ouverte » signifie maintenant exactement **« seuls les pneus touchent le sol »**.
+
+Vérifié dans les DEUX sens, ce que le premier correctif n'avait pas fait :
+
+| | porte |
+|---|---|
+| 128 envs debout sur roues, ctrl HOME, pas 0–25 | **0.99 → 1.00** (`limbs` jamais déclenché) |
+| les mêmes après bascule (pas 100, tête au sol) | 0.39 |
+| vautré hanches + tibias (test unitaire) | **0** |
+
+Smoke : `pose_stand_legs` 0.0896 → 0.0288 sur policy aléatoire — la fuite valait 3×.
+
+⚠️ **Leçon de méthode.** Une porte par contacts se lit « telle partie ne touche pas », pas
+« le robot est debout ». Toute liste d'interdits incomplète est une fuite silencieuse qui
+*ressemble à un progrès dans les courbes*. Le contre-test obligatoire est double : la porte
+s'ouvre-t-elle debout, ET reste-t-elle fermée sur chaque vautrage stable ?
+
+### Lecture des métriques — ce qui est fiable
+
+| jauge | calcul | ce que ça dit |
+|---|---|---|
+| `standing_composite / 3.75` **vs** `Curriculum/ground_state_mix` | ratio | **le test principal.** Le second logge `standing_prob`. Égalité = seuls les envs déjà debout marquent = aucun relevé |
+| `pose_stand_legs / 1.9` | ≈ fraction du temps porte ouverte | honnête **depuis le correctif de fuite seulement** |
+| `\|height_stand_l1\| / 7.5` | erreur de hauteur (m) | 32 mm sur le trépied, 4 mm quand ça tient |
+| `acos(upright_linear / 1.5)` | inclinaison du tronc | **55° = trépied**, 46° = calé sur les hanches, < 26° = debout |
+
+⚠️ `standing_composite` écrase par un facteur de verticalité d'écart-type 0.40 : à 32°
+d'inclinaison ce facteur vaut déjà 0.39. Un composite bas peut donc vouloir dire « penché »
+plutôt que « pas debout » — c'est `pose_stand_legs` (gaté) qui départage.

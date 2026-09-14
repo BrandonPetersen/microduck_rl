@@ -858,7 +858,18 @@ def standing_composite_score(
 # declares none of them gets an all-ones gate (see wheel_support_gate), so
 # these variants are safe to call anywhere.
 _WHEEL_SUPPORT_FEET_SENSOR = "feet_ground_contact"
-_WHEEL_SUPPORT_FORBIDDEN_SENSORS = ("head_ground_contact", "trunk_ground_contact")
+# ⚠️ Les TROIS sensors sont nécessaires, et l'oubli du troisième a produit un
+# faux positif mesurable (run avec la porte v1) : le modèle rollers n'a que 12
+# géoms de collision — np_f970 (batterie) sur trunk_base, 3 géoms de tête sur
+# jaw_soft, hip_l/hip_l_2, leg/leg_2, et les 4 pneus. Les coques du tronc sont
+# VISUELLES. Un robot vautré reposant sur ses hanches et ses tibias, avec un pneu
+# qui frôle le sol et la tête relevée, ne déclenchait donc ni head_ground_contact
+# ni trunk_ground_contact : la porte s'ouvrait à plat par terre.
+_WHEEL_SUPPORT_FORBIDDEN_SENSORS = (
+    "head_ground_contact",
+    "trunk_ground_contact",
+    "limbs_ground_contact",
+)
 
 
 def wheel_support_gate(

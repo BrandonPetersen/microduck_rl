@@ -770,9 +770,11 @@ def test_support_gate_sensors_are_declared():
     # Hérités de l'env roller.
     assert "feet_ground_contact" in names
     assert "self_collision" in names
-    # Ajoutés pour la porte d'appui.
+    # Ajoutés pour la porte d'appui. Les TROIS sont nécessaires : sans
+    # limbs_ground_contact, un robot vautré sur hanches + tibias ouvre la porte.
     assert "head_ground_contact" in names
     assert "trunk_ground_contact" in names
+    assert "limbs_ground_contact" in names
 
 
 def test_trunk_ground_sensor_is_body_not_subtree():
@@ -808,8 +810,8 @@ def test_gated_sensor_bodies_exist_on_both_roller_models():
             mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, i)
             for i in range(model.nbody)
         }
-        assert "jaw_soft" in bodies, f"{spec_fn.__name__}: {sorted(bodies)}"
-        assert "trunk_base" in bodies, f"{spec_fn.__name__}: {sorted(bodies)}"
+        for name in ("jaw_soft", "trunk_base", "hip_l", "hip_l_2", "leg", "leg_2"):
+            assert name in bodies, f"{spec_fn.__name__}: {name} absent"
 
 
 def test_goal_state_rewards_are_gated_on_wheel_support():

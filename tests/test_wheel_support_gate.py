@@ -150,3 +150,52 @@ def test_gated_variants_multiply_the_base_reward():
     )
     assert closed.tolist() == [0.0]
     assert opened.tolist() == [1.0]
+
+
+# ── Le trou de la porte v1 : hanches et tibias ───────────────────────────────
+# Mesuré sur le premier run gaté. Le modèle rollers n'a que 12 géoms de
+# collision : np_f970 (batterie) sur trunk_base, 3 géoms de tête sur jaw_soft,
+# hip_l/hip_l_2, leg/leg_2, et les 4 pneus. Les coques du tronc sont VISUELLES.
+# Un robot vautré reposant sur ses hanches et ses tibias, un pneu frôlant le sol
+# et la tête relevée, ne déclenchait donc NI head_ground_contact NI
+# trunk_ground_contact : la porte s'ouvrait à plat par terre et pose_stand_legs
+# payait. Symptôme : pose_stand_legs/1.9 = 0.67 alors que standing_prob = 0.50,
+# lu à tort comme « un tiers des départs ventre se relèvent ».
+
+
+def test_sprawl_on_hips_and_shins_scores_zero():
+    g = _gate(
+        {
+            "feet_ground_contact": [[1.0]],
+            "head_ground_contact": [[0.0]],
+            "trunk_ground_contact": [[0.0]],
+            "limbs_ground_contact": [[1.0]],
+        }
+    )
+    assert g.tolist() == [0.0]
+
+
+def test_limbs_sensor_is_in_the_default_forbidden_set():
+    """Le défaut doit inclure les trois, sinon un env qui l'omet refuit."""
+    assert mdp._WHEEL_SUPPORT_FORBIDDEN_SENSORS == (
+        "head_ground_contact",
+        "trunk_ground_contact",
+        "limbs_ground_contact",
+    )
+
+
+def test_only_wheels_touching_still_opens():
+    """La porte doit rester OUVRABLE : debout, seuls les pneus touchent.
+
+    Le risque symétrique du correctif : trop d'interdits et la porte ne s'ouvre
+    plus jamais, ce qui annule silencieusement les récompenses d'état-but.
+    """
+    g = _gate(
+        {
+            "feet_ground_contact": [[1.0]],
+            "head_ground_contact": [[0.0]],
+            "trunk_ground_contact": [[0.0]],
+            "limbs_ground_contact": [[0.0]],
+        }
+    )
+    assert g.tolist() == [1.0]

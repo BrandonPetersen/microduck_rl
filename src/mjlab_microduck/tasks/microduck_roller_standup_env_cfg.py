@@ -184,7 +184,29 @@ def make_microduck_roller_standup_env_cfg(play: bool = False) -> ManagerBasedRlE
         reduce="none",
         num_slots=1,
     )
-    cfg.scene.sensors = tuple(cfg.scene.sensors) + (head_ground_cfg, trunk_ground_cfg)
+    # Hanches et tibias — le trou de la porte v1, mesuré. Le modèle n'a que 12
+    # géoms de collision : batterie (trunk_base), 3 de tête (jaw_soft),
+    # hip_l/hip_l_2, leg/leg_2, et les 4 pneus. Les coques du tronc sont
+    # VISUELLES, donc un robot vautré sur ses hanches et ses tibias, un pneu
+    # frôlant le sol et la tête relevée, n'ouvrait aucun des deux capteurs
+    # précédents : la porte s'ouvrait à plat par terre, et `pose_stand_legs`
+    # payait. Avec ce troisième capteur, « porte ouverte » signifie exactement
+    # « seuls les pneus touchent le sol ».
+    limbs_ground_cfg = ContactSensorCfg(
+        name="limbs_ground_contact",
+        primary=ContactMatch(
+            mode="body", pattern=r"^(hip_l|hip_l_2|leg|leg_2)$", entity="robot"
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found",),
+        reduce="none",
+        num_slots=1,
+    )
+    cfg.scene.sensors = tuple(cfg.scene.sensors) + (
+        head_ground_cfg,
+        trunk_ground_cfg,
+        limbs_ground_cfg,
+    )
 
     # ── Récompenses de patinage retirées ─────────────────────────────────────
     for name in _SKATING_REWARDS:
