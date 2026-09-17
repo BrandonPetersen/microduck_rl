@@ -46,10 +46,52 @@ BAM_STIFF_SOLREF_FRICTION = (-5.0e4, -2.0e2)
 BAM_STIFF_SOLIMP_FRICTION = (0.99, 0.9999, 0.001, 0.5, 2.0)
 
 
-def load_bam_model(kp_fw: float, vin: float, max_current):
+# XL330 gearbox variants. The BAM m6 fit is an XL330-M288-T (the servo on the
+# robot). The M077 shares the same coreless motor, windings and 4096-cpr output
+# encoder; only the gearbox differs (Robotis: 288.35:1 vs 77.5:1), so we
+# GUESSTIMATE it from the M288 fit instead of a BAM identification:
+#   kt (output-referred Nm/A)  x 1/N     -> N x lower torque, N x higher no-load speed
+#   armature (motor J x N^2)  x 1/N^2
+#   Coulomb + Stribeck friction (motor-side, referred to output)  x 1/N
+#   viscous friction (motor-side, referred to output)              x 1/N^2
+#   load_friction_* (dimensionless gearbox efficiency coefficients) unchanged
+#   firmware kp: acts on output-encoder counts -> same duty per rad of error,
+#   i.e. N x SOFTER position loop at the same kp (use --kp-fw N*200 to match
+#   the M288 stiffness at the cost of N x earlier PWM saturation).
+# Torque hypotheses: pure gear ratio 1/3.72 = 0.269 (pessimistic), or Robotis
+# stall-torque spec ratio 0.22/0.52 Nm @6V = 0.42 (the M288's extra gear
+# stages lose more, which the m6 fit books partly as load friction).
+XL330_GEAR_RATIO = {"m288": 288.35, "m077": 77.5}
+M077_KT_SCALE_GEAR = XL330_GEAR_RATIO["m077"] / XL330_GEAR_RATIO["m288"]   # 0.269
+M077_KT_SCALE_SPEC = 0.22 / 0.52                                            # 0.42
+
+
+def apply_gearbox_variant(bam_model, motor: str, kt_scale: float | None = None,
+                          scale_friction: bool = True):
+    """Rescale an M288 (m6) BAM fit into another XL330 gearbox variant, in place."""
+    if motor == "m288":
+        return bam_model
+    n_ratio = XL330_GEAR_RATIO[motor] / XL330_GEAR_RATIO["m288"]   # <1 for m077
+    kt_scale = n_ratio if kt_scale is None else kt_scale
+    bam_model.kt.value *= kt_scale
+    bam_model.armature.value *= n_ratio ** 2
+    if scale_friction:
+        bam_model.friction_base.value *= n_ratio
+        if hasattr(bam_model, "friction_stribeck"):
+            bam_model.friction_stribeck.value *= n_ratio
+        bam_model.friction_viscous.value *= n_ratio ** 2
+    print(f"XL330-{motor.upper()} guesstimate from the M288 fit: gear ratio x{n_ratio:.3f}, "
+          f"kt x{kt_scale:.3f} -> {bam_model.kt.value:.4f} Nm/A, armature -> "
+          f"{bam_model.armature.value:.2e}, friction scaled={scale_friction}")
+    return bam_model
+
+
+def load_bam_model(kp_fw: float, vin: float, max_current, motor: str = "m288",
+                   kt_scale: float | None = None, scale_friction: bool = True):
     """Build the BAM M6 model + XL330 voltage-controlled actuator."""
     from bam.model import load_model
     bam_model = load_model(motor_name=BAM_MOTOR_NAME, model=BAM_MODEL)
+    apply_gearbox_variant(bam_model, motor, kt_scale, scale_friction)
     bam_model.actuator.kp = kp_fw
     bam_model.actuator.vin = vin
     bam_model.actuator.max_current = max_current if (max_current and max_current > 0) else None
@@ -1208,6 +1250,17 @@ def main():
                              f"Training samples per-env in {BAM_VIN_DROP_GAIN_RANGE}. 0 disables.")
     parser.add_argument("--kp-fw", type=float, default=BAM_KP_FW,
                         help="BAM firmware P-gain (training uses %(default)s).")
+    parser.add_argument("--motor", choices=sorted(XL330_GEAR_RATIO), default="m288",
+                        help="XL330 gearbox variant. m288 = the identified BAM m6 fit (robot as "
+                             "built). m077 = guesstimate rescaled from it (kt, armature, friction "
+                             "by gear ratio 77.5/288.35; kp unchanged -> ~3.7x softer loop, add "
+                             f"--kp-fw {BAM_KP_FW * XL330_GEAR_RATIO['m288'] / XL330_GEAR_RATIO['m077']:.0f} "
+                             "to match the M288 stiffness).")
+    parser.add_argument("--kt-scale", type=float, default=None,
+                        help="Override the --motor kt scale (m077 default = gear ratio 0.269; "
+                             f"Robotis stall-torque spec ratio = {M077_KT_SCALE_SPEC:.2f}).")
+    parser.add_argument("--keep-friction", action="store_true",
+                        help="With --motor m077: keep the M288 friction parameters unscaled.")
     parser.add_argument("--current-limit", type=float, default=0.0,
                         help="XL330 firmware current limit [A]. With BAM this is the duty-cycle "
                              "limiter of the voltage model (as bam models it); with --no-bam the "
@@ -1276,7 +1329,9 @@ def main():
         # voltage control + load-dependent friction budget), driven on CPU by
         # bam.mujoco.MujocoController. Voltage DR collapses to fixed --vin /
         # --vin-drop-gain (training samples them per env).
-        bam_model = load_bam_model(args.kp_fw, args.vin, args.current_limit)
+        bam_model = load_bam_model(args.kp_fw, args.vin, args.current_limit,
+                                   motor=args.motor, kt_scale=args.kt_scale,
+                                   scale_friction=not args.keep_friction)
         vin_drop_gain = args.vin_drop_gain if args.vin_drop_gain > 0 else None
         model, data, bam_ctrl, _bam_names = load_mujoco_with_bam(
             xml_path, bam_model, 0.005, vin_drop_gain, BAM_VIN_MIN)

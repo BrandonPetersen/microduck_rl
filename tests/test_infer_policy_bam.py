@@ -95,3 +95,31 @@ def test_bam_step_loop_runs_with_live_friction(bam_sim):
     assert (np.abs(data.ctrl) <= limit + 1e-9).all()  # ctrl IS the motor torque
     assert (model.dof_frictionloss[dofs] > 0).all()  # BAM budget written every step
     assert np.allclose(model.dof_damping[dofs], bam_model.friction_viscous.value)
+
+
+def test_m077_gearbox_guesstimate_rescales_m288_fit(ip):
+    """--motor m077 rescales the identified M288 (m6) fit by the gear ratio:
+    kt and Coulomb friction x1/N, armature and viscous friction x1/N^2, the
+    dimensionless load-friction coefficients untouched; m288 is a no-op."""
+    ref = ip.load_bam_model(ip.BAM_KP_FW, 7.4, None)
+    same = ip.load_bam_model(ip.BAM_KP_FW, 7.4, None, motor="m288")
+    assert same.kt.value == ref.kt.value and same.armature.value == ref.armature.value
+
+    n = ip.XL330_GEAR_RATIO["m077"] / ip.XL330_GEAR_RATIO["m288"]
+    assert 0.26 < n < 0.28
+    m077 = ip.load_bam_model(ip.BAM_KP_FW, 7.4, None, motor="m077")
+    assert np.isclose(m077.kt.value, ref.kt.value * n)
+    assert np.isclose(m077.R.value, ref.R.value)
+    assert np.isclose(m077.armature.value, ref.armature.value * n**2)
+    assert np.isclose(m077.friction_base.value, ref.friction_base.value * n)
+    assert np.isclose(m077.friction_viscous.value, ref.friction_viscous.value * n**2)
+    assert np.isclose(m077.load_friction_motor.value, ref.load_friction_motor.value)
+    # ~3.7x lower torque ceiling, same firmware kp -> softer loop unless --kp-fw is raised
+    assert np.isclose(m077.actuator.vin * m077.kt.value / m077.R.value,
+                      n * ref.actuator.vin * ref.kt.value / ref.R.value)
+
+    spec = ip.load_bam_model(ip.BAM_KP_FW, 7.4, None, motor="m077",
+                             kt_scale=ip.M077_KT_SCALE_SPEC, scale_friction=False)
+    assert np.isclose(spec.kt.value, ref.kt.value * ip.M077_KT_SCALE_SPEC)
+    assert np.isclose(spec.friction_base.value, ref.friction_base.value)
+    assert np.isclose(spec.armature.value, ref.armature.value * n**2)
