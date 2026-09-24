@@ -32,6 +32,7 @@ HOP_PERIOD = 1.0
 # linux/input-event-codes.h
 EV_KEY = 1
 BTN_SOUTH, BTN_EAST, BTN_START = 0x130, 0x131, 0x13B
+BTN_NORTH = 0x133          # Y/triangle -- the hands-free re-stand
 EVENT_FMT = "llHHi"           # struct input_event on 64-bit: timeval(2 x long), type, code, value
 EVENT_SIZE = struct.calcsize(EVENT_FMT)
 
@@ -77,6 +78,12 @@ def main():
     ap.add_argument("--device", default="/dev/input/event4")
     ap.add_argument("--hold", type=float, default=0.65)
     ap.add_argument("--hops", type=int, default=1, help="cycles per A press")
+    ap.add_argument("--restand-delay", type=float, default=4.0,
+                    help="seconds between relaxing and re-enabling when Y is pressed. Long "
+                         "enough to set the robot on its feet with BOTH hands: torque off "
+                         "collapses the legs, so it has to be held until the policy takes over, "
+                         "and holding it one-handed while reaching for START is what made "
+                         "retrying after a fall not worth doing (2026-09-24).")
     ap.add_argument("--hop-seconds", type=float, default=None,
                     help="seconds of hopping per A press, overriding --hops. The HopFree gait "
                          "bounces at ~8.5 Hz with landing impacts of 3-6x body weight, so the "
@@ -149,6 +156,18 @@ def main():
                         print("[pad] HOP via ground-pick slot", flush=True)
                     else:
                         hop_t0 = time.time(); print("[pad] HOP (phase advance)", flush=True)
+                elif code == BTN_NORTH:
+                    # RE-STAND: relax, count down while you place it, re-enable.
+                    # The robot is statically stable on the 50 mm boots once it
+                    # is at the home pose, so the only hard part is the moment
+                    # between torque-off and the policy having it.
+                    enabled = False; hop_t0 = None; robot.relax()
+                    print(f"[pad] RE-STAND: place the robot on its feet", flush=True)
+                    for k in range(int(args.restand_delay), 0, -1):
+                        print(f"        enabling in {k}...", flush=True)
+                        time.sleep(1.0)
+                    enabled = True; robot.enable(True)
+                    print("[pad] re-enabled; 2 s home ramp, then the policy has it", flush=True)
                 elif code == BTN_EAST:
                     enabled = False; hop_t0 = None; robot.relax()
         # --- phase ---

@@ -27,6 +27,6 @@ done
 [ -n "$DEV" ] || { echo "no pad found; is it paired and on?"; exit 1; }
 
 echo "hop burst: ${BURST}s per A press"
-echo "START = enable   A = hop   B = relax   ctrl-C = quit"
+echo "START = enable   A = hop   Y = re-stand (relax, place it, auto-enable)   B = relax   ctrl-C = quit"
 exec python3 ~/hop_phase_driver.py --device "$DEV" --hold 0.65 \
      --hop-seconds "$BURST" --enable-bit
