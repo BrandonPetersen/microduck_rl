@@ -36,6 +36,12 @@ NAMES = {
 # carries bit 0 permanently (2S pack at ~8 V), so blinking red LEDs are its
 # normal state and never explain a robot that will not stand.
 LATCHING = 52
+# The joints whose MJCF range is exactly +/-pi/2 on both sides -- an
+# onshape-to-robot export default rather than a measured limit. These are what
+# `--watch` measures by default, because they are the ones the model invented.
+PLACEHOLDER_JOINTS = "left_ankle,right_ankle,left_knee,right_knee,left_hip_pitch,right_hip_pitch"
+SHORT = {"left_ankle": "l_ank", "right_ankle": "r_ank", "left_knee": "l_kne",
+         "right_knee": "r_kne", "left_hip_pitch": "l_hip", "right_hip_pitch": "r_hip"}
 INST_READ, INST_REBOOT = 0x02, 0x08
 # Hardware Error Status bits, XL330 control table.
 BITS = {
@@ -172,8 +178,9 @@ def _watch(ser, ids, names):
             deg = (struct.unpack("<i", pp)[0] - 2048) * 360.0 / 4096.0
             lo[i] = min(lo[i], deg)
             hi[i] = max(hi[i], deg)
-            line.append(f"{names.get(i, i)} {deg:+7.1f} [{lo[i]:+7.1f},{hi[i]:+7.1f}]")
-        print("  " + " | ".join(line) + "        ", end="\r", flush=True)
+            nm = names.get(i, str(i))
+            line.append(f"{SHORT.get(nm, nm)}{deg:+6.1f}[{lo[i]:+6.1f},{hi[i]:+6.1f}]")
+        print(" " + " ".join(line) + "   ", end="\r", flush=True)
         time.sleep(0.05)
     print("\n\nmeasured travel:")
     for i in ids:
@@ -194,7 +201,7 @@ def main() -> int:
                     help="also read Min/Max Position Limit and Present Position. The XL330 "
                          "refuses a goal outside its position limits and will sit against a "
                          "mechanical stop drawing current, which is how an ankle overloads.")
-    ap.add_argument("--watch", metavar="NAMES", default=None,
+    ap.add_argument("--watch", metavar="NAMES", nargs="?", const=PLACEHOLDER_JOINTS, default=None,
                     help="live min/max of these joints (comma-separated names or ids) with "
                          "torque OFF, so you can move each one to its mechanical stops and "
                          "read the real travel. The MJCF gives hip_pitch, knee and ankle an "
