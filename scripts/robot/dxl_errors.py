@@ -292,6 +292,10 @@ def main() -> int:
             ids.append(int(part))
     ser = _Port(a.port, a.baud)
     if a.watch:
+        print("--watch is superseded by joint_travel.py, which does one Sync Read per\n"
+              "cycle instead of six round trips. Use:  sudo python3 joint_travel.py\n")
+        return 2
+    if False:
         by_name = {v: k for k, v in NAMES.items()}
         want = [by_name.get(w.strip(), None) or (int(w) if w.strip().isdigit() else None)
                 for w in a.watch.split(",")]
