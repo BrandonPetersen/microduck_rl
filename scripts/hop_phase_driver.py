@@ -77,6 +77,10 @@ def main():
     ap.add_argument("--device", default="/dev/input/event4")
     ap.add_argument("--hold", type=float, default=0.65)
     ap.add_argument("--hops", type=int, default=1, help="cycles per A press")
+    ap.add_argument("--hop-seconds", type=float, default=None,
+                    help="seconds of hopping per A press, overriding --hops. The HopFree gait "
+                         "bounces at ~8.5 Hz with landing impacts of 3-6x body weight, so the "
+                         "first hardware bursts should be short (0.3) rather than a full cycle.")
     ap.add_argument("--hz", type=float, default=50.0)
     ap.add_argument("--enable-bit", action="store_true",
                     help="write 1.0 into the vyaw slot while the phase advances and 0.0 while it "
@@ -151,7 +155,8 @@ def main():
         now = time.time()
         if hop_t0 is not None:
             el = now - hop_t0
-            if el >= args.hops * HOP_PERIOD:
+            burst = args.hop_seconds if args.hop_seconds is not None else args.hops * HOP_PERIOD
+            if el >= burst:
                 hop_t0 = None; phi = args.hold; print("[pad] back to stand", flush=True)
             else:
                 phi = (args.hold + el / HOP_PERIOD) % 1.0
