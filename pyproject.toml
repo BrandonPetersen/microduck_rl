@@ -86,7 +86,30 @@ override-dependencies = [
 # mjlab now comes from PyPI (==1.3.0, pinned in [project.dependencies]); no git source.
 # Official BAM actuator model. Switch to `main` (or a tag) once the
 # mjlab-facing API lands there.
-better-actuator-models = { git = "https://github.com/Rhoban/bam.git", branch = "mjlab_frictionloss" }
+#
+# Pinned to a REV, not the branch, as of 2026-09-14. `mjlab_frictionloss` is
+# upstream's own active dev branch, not a stable API: this repo's own
+# uv.lock has always frozen it at a specific commit and never noticed the
+# branch moving, but a fresh sibling project resolving `branch =
+# "mjlab_frictionloss"` from scratch (built for swarm/, which depends on
+# this package — see swarm/docs/swarm_marl_plan.md) hit the CURRENT branch
+# HEAD (57d13ead53206a6bf0db3d66f86506ae8c2ce01a) and broke immediately:
+# that commit dropped/renamed the `vin_drop_gain_range` kwarg
+# `microduck_constants.py`'s `_BAM_ACTUATOR_KWARGS` still passes to
+# `FrictionDRBamActuatorCfg`. Pinning here to the commit this repo's own
+# lockfile already had frozen makes that explicit instead of accidental, and
+# gives swarm/ a stable rev to match without editing this file again.
+#
+# If you `git pull` and this line conflicts, or CI/a fresh clone starts
+# failing with an unexpected-kwarg error from FrictionDRBamActuatorCfg:
+# upstream `mjlab_frictionloss` moved again. Re-check bam's actuator API
+# against `_BAM_ACTUATOR_KWARGS` above, update the rev below once compatible
+# (`git ls-remote https://github.com/Rhoban/bam.git mjlab_frictionloss` for
+# current HEAD), run the smoke test, and update the matching rev in
+# ../swarm/pyproject.toml in the same change — the two are meant to stay in
+# lockstep, and swarm's own uv resolution will hard-fail (conflicting
+# sources) rather than silently drift if they don't.
+better-actuator-models = { git = "https://github.com/Rhoban/bam.git", rev = "62bd8ce12154340be97e06f7f41a0ca8f116d967" }
 # For local BAM development, comment the line above and use:
 # better-actuator-models = { path = "/home/antoine/Rhoban/bam", editable = true }
 # On linux-aarch64 (DGX Spark / GB10) PyPI's torch wheel is CPU-ONLY:
