@@ -97,6 +97,11 @@ class Port:
         termios.tcflush(self.fd, termios.TCIOFLUSH)   # once, at open
 
     def ask(self, pkt: bytes, want: int, timeout: float):
+        # Flush BEFORE the write, not after. Replies that arrived past the last
+        # deadline otherwise sit in the kernel buffer and shift every frame
+        # boundary in the next parse, which is what turned a working first
+        # cycle into a stream of raw-zero reads.
+        termios.tcflush(self.fd, termios.TCIFLUSH)
         os.write(self.fd, pkt)
         termios.tcdrain(self.fd)
         buf, got, deadline = b"", {}, time.time() + timeout
@@ -106,8 +111,13 @@ class Port:
                 if chunk:
                     buf += chunk
                     for fid, _err, params in frames(buf):
-                        if len(params) >= LEN_POSITION:
-                            got[fid] = struct.unpack("<i", params[:LEN_POSITION])[0]
+                        if len(params) < LEN_POSITION:
+                            continue
+                        raw = struct.unpack("<i", params[:LEN_POSITION])[0]
+                        # Raw 0 is -180 deg, which no joint on this robot can
+                        # reach; it only appears on a desynced read.
+                        if raw != 0:
+                            got[fid] = raw
         return got
 
 
@@ -121,6 +131,10 @@ def main() -> int:
     ap.add_argument("--baud", type=int, default=1_000_000)
     ap.add_argument("--joints", default=DEFAULT, help="ids or names, comma separated")
     ap.add_argument("--hz", type=float, default=10.0)
+    ap.add_argument("--seconds", type=float, default=None,
+                    help="stop after this long and print the summary, instead of waiting for "
+                         "Ctrl-C. Ctrl-C still works; this exists so the sweep can be driven "
+                         "from a script without a signal racing the wrapper's cleanup trap.")
     a = ap.parse_args()
 
     by_name = {n: i for i, n, _ in JOINTS}
@@ -136,9 +150,10 @@ def main() -> int:
     n = {i: 0 for i in ids}
 
     print("Torque OFF. Move each joint slowly to BOTH stops. Ctrl-C when done.\n")
+    t_end = time.time() + a.seconds if a.seconds else None
     try:
-        while True:
-            got = port.ask(pkt, len(ids), timeout=0.15)
+        while t_end is None or time.time() < t_end:
+            got = port.ask(pkt, len(ids), timeout=0.25)
             cells = []
             for i in ids:
                 if i in got:
