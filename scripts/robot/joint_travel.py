@@ -130,7 +130,7 @@ def main() -> int:
     ap.add_argument("--port", default="/dev/ttyS2")
     ap.add_argument("--baud", type=int, default=1_000_000)
     ap.add_argument("--joints", default=DEFAULT, help="ids or names, comma separated")
-    ap.add_argument("--hz", type=float, default=10.0)
+    ap.add_argument("--hz", type=float, default=30.0)
     ap.add_argument("--seconds", type=float, default=None,
                     help="stop after this long and print the summary, instead of waiting for "
                          "Ctrl-C. Ctrl-C still works; this exists so the sweep can be driven "
@@ -153,7 +153,12 @@ def main() -> int:
     t_end = time.time() + a.seconds if a.seconds else None
     try:
         while t_end is None or time.time() < t_end:
-            got = port.ask(pkt, len(ids), timeout=0.25)
+            # Short timeout, and partial replies are fine: min/max is tracked per
+            # joint, so a joint that misses a cycle simply has one fewer sample.
+            # At 0.25 s a cycle that lost one reply blocked the whole sweep, and
+            # a 30 s hand sweep came back with 11 samples -- nowhere near enough
+            # to catch a stop you pass through once.
+            got = port.ask(pkt, len(ids), timeout=0.04)
             cells = []
             for i in ids:
                 if i in got:

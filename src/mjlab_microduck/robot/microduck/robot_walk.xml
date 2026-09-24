@@ -147,7 +147,7 @@
             <!-- Link leg -->
             <body name="leg" pos="0.022 0.0357771 -0.004" quat="0 0.707107 0.707107 0">
               <!-- Joint from upper_leg_left to leg -->
-              <joint axis="0 0 1" name="left_knee" type="hinge" range="-1.5707963267948983 1.5707963267948948" class="chosen_actuator"/>
+              <joint axis="0 0 1" name="left_knee" type="hinge" range="-1.989675 1.396263" class="chosen_actuator"/>
               <inertial pos="-1.52e-10 0.0318937 -0.00953505" mass="0.0215844" fullinertia="5.25056e-06 2.15507e-06 4.33925e-06 -1e-12 0 7.65005e-07"/>
               <!-- Part leg -->
               <geom type="mesh" class="visual" pos="-0.022 0.0357771 0.0385" quat="0.5 0.5 0.5 -0.5" mesh="leg" material="leg_material"/>
@@ -157,7 +157,7 @@
               <!-- Link ankle_left -->
               <body name="ankle_left" pos="-0 0.042 -0.026" quat="0 -1 -0 0">
                 <!-- Joint from leg to ankle_left -->
-                <joint axis="0 0 1" name="left_ankle" type="hinge" range="-1.5707963267949063 1.5707963267948868" class="chosen_actuator"/>
+                <joint axis="0 0 1" name="left_ankle" type="hinge" range="-1.308997 1.308997" class="chosen_actuator"/>
                 <inertial pos="-0.00615742 -0.0137483 -0.0156585" mass="0.0300246" fullinertia="5.91525e-06 1.11534e-05 7.74016e-06 -2.05354e-07 8.218e-08 5.6722e-08"/>
                 <!-- Part sole_left -->
                 <geom type="mesh" class="visual" pos="-0.022 0.00622291 -0.0647" quat="0.5 -0.5 -0.5 -0.5" mesh="sole_left" material="sole_left_material"/>
@@ -300,7 +300,7 @@
             <!-- Link leg_2 -->
             <body name="leg_2" pos="-0.022 0.0357771 -0.004" quat="0 1 -0 -0">
               <!-- Joint from upper_leg_right to leg_2 -->
-              <joint axis="0 0 1" name="right_knee" type="hinge" range="-1.5707963267949339 1.5707963267948593" class="chosen_actuator"/>
+              <joint axis="0 0 1" name="right_knee" type="hinge" range="-1.396263 1.989675" class="chosen_actuator"/>
               <inertial pos="-0.0318937 -1.52e-10 -0.00953505" mass="0.0215844" fullinertia="2.15507e-06 5.25056e-06 4.33925e-06 1e-12 -7.65005e-07 0"/>
               <!-- Part xl330_15 -->
               <geom type="mesh" class="visual" pos="-0.042 0 -0.0115" quat="0.707107 -0 -0.707107 -0" mesh="xl330" material="xl330_material"/>
@@ -310,7 +310,7 @@
               <!-- Link ankle_right -->
               <body name="ankle_right" pos="-0.042 0 -0.026" quat="0 -0.707107 -0.707107 0">
                 <!-- Joint from leg_2 to ankle_right -->
-                <joint axis="0 0 1" name="right_ankle" type="hinge" range="-1.5707963267949028 1.5707963267948903" class="chosen_actuator"/>
+                <joint axis="0 0 1" name="right_ankle" type="hinge" range="-1.308997 1.308997" class="chosen_actuator"/>
                 <inertial pos="0.00615539 -0.0137482 -0.0156566" mass="0.0300251" fullinertia="5.91534e-06 1.11534e-05 7.74015e-06 2.04877e-07 -8.2467e-08 5.7017e-08"/>
                 <!-- Part ankle_right -->
                 <geom type="mesh" class="visual" pos="0.022 0.00622291 -0.0647" quat="0.5 -0.5 0.5 0.5" mesh="ankle_right" material="ankle_right_material"/>
