@@ -198,6 +198,7 @@ def _watch(ser, ids, names):
     import signal
     lo = {i: 9e9 for i in ids}
     hi = {i: -9e9 for i in ids}
+    n_ok = {i: 0 for i in ids}      # a joint that never answers must SAY so
     stop = {"now": False}
     signal.signal(signal.SIGINT, lambda *_: stop.__setitem__("now", True))
     print("Torque must be OFF (robotctl robot relax). Move each joint slowly to BOTH stops.")
@@ -212,6 +213,7 @@ def _watch(ser, ids, names):
             if raw == 0:
                 continue          # a desynced read, not a real -180 deg
             deg = (raw - 2048) * 360.0 / 4096.0
+            n_ok[i] += 1
             lo[i] = min(lo[i], deg)
             hi[i] = max(hi[i], deg)
             nm = names.get(i, str(i))
@@ -224,14 +226,23 @@ def _watch(ser, ids, names):
     bad = []
     for i in ids:
         if lo[i] > 9e8:
+            # Silently dropping these is how a re-sweep of the right knee came
+            # back with the right knee simply absent from the summary.
+            print(f"  {names.get(i, i):16s} NO DATA -- the servo never answered during the sweep")
+            bad.append(names.get(i, i))
             continue
         home = HOME_DEG.get(i)
         note = ""
         if home is not None and not (lo[i] - 2 <= home <= hi[i] + 2):
             note = f"   <-- INCOMPLETE: never reached home ({home:+.1f})"
             bad.append(names.get(i, i))
+        span = hi[i] - lo[i]
+        if span < 5.0 and not note:
+            note = f"   <-- barely moved ({span:.1f} deg swept)"
+            bad.append(names.get(i, i))
         print(f"  {names.get(i, i):16s} [{lo[i]:+7.1f}, {hi[i]:+7.1f}] deg   "
-              f"= [{lo[i] * 3.14159 / 180:+.4f}, {hi[i] * 3.14159 / 180:+.4f}] rad{note}")
+              f"= [{lo[i] * 3.14159 / 180:+.4f}, {hi[i] * 3.14159 / 180:+.4f}] rad"
+              f"  {n_ok[i]:4d} samples{note}")
     # Mirror cross-check: left [a,b] should predict right [-b,-a].
     done = set()
     for i in ids:
