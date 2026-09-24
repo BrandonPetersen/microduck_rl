@@ -274,6 +274,42 @@ def _reward_manager_init_gate_check(self, *args, **kwargs):
 _RewardManager.__init__ = _reward_manager_init_gate_check
 print("[mdp] Patch 7 active: enable-bit / hop-reward wiring check")
 
+# ---------------------------------------------------------------------------
+# Patch 8: clamp joint position targets to the joint's own soft limits.
+#
+# UNCONDITIONAL, because without it sim and hardware DISAGREE about what an
+# out-of-range target means, and that disagreement cost a servo on 2026-09-24.
+# In sim MuJoCo silently clamps the resulting motion and the policy pays
+# nothing for asking; on the robot the servo chases the goal into a mechanical
+# stop, stalls, and latches an overload. The HopFree hop commanded the ankle to
+# +/-102.8 deg against a stop near 76 and did exactly that. Nothing downstream
+# catches it either: the servos' Position Limit registers read [-180, +180] and
+# duck-control clamps only to the ACTUATOR's travel.
+#
+# Clamping the target makes the two agree: the policy can still ask, it simply
+# gets the same saturation in both places. It is applied to the value actually
+# sent, after the encoder-bias correction, since that is what the servo sees.
+from mjlab.envs.mdp.actions.actions import JointPositionAction as _JointPositionAction  # noqa: E402
+
+_orig_apply_actions = _JointPositionAction.apply_actions
+
+
+def _apply_actions_clamped(self):
+    limits = getattr(self._entity.data, "soft_joint_pos_limits", None)
+    if limits is None:
+        return _orig_apply_actions(self)
+    encoder_bias = self._entity.data.encoder_bias[:, self._target_ids]
+    target = self._processed_actions - encoder_bias
+    lo = limits[:, self._target_ids, 0]
+    hi = limits[:, self._target_ids, 1]
+    self._entity.set_joint_position_target(
+        torch.clamp(target, lo, hi), joint_ids=self._target_ids
+    )
+
+
+_JointPositionAction.apply_actions = _apply_actions_clamped
+print("[mdp] Patch 8 active: joint position targets clamped to soft limits")
+
 if TYPE_CHECKING:
     from mjlab.viewer.debug_visualizer import DebugVisualizer
 
@@ -7461,6 +7497,37 @@ class hop_landing_height(_HopRiseTracker):
         self._flight_peak = torch.where(landed, zeros, self._flight_peak)
         self._flight_steps = torch.where(landed, zeros, self._flight_steps)
         return payout
+
+
+def joint_limit_proximity(
+    env: ManagerBasedRlEnv,
+    asset_cfg: SceneEntityCfg = _DEFAULT_ASSET_CFG,
+    margin: float = 0.25,
+) -> torch.Tensor:
+    """Penalise sitting near a joint limit, over a band far wider than the stock term.
+
+    mjlab's `dof_pos_limits` only fires inside the last ~7.5% of travel, which
+    is too late to stop a policy PARKING on a stop -- and parking on stops is
+    what this one does: the HopFree gait rides the knee to 86 deg of a 90 deg
+    range and commands the ankle 27 deg past its stop. On hardware that is a
+    stalled servo rather than a saturated one.
+
+    Quadratic in how far into the last `margin` fraction of range the joint
+    sits, summed over joints, so the cost rises smoothly from nothing at 75% of
+    travel to 1 per joint at the stop. Self-negating (returns <= 0), so it takes
+    a POSITIVE weight -- see the sign convention note at the top of this file.
+    """
+    asset: Entity = env.scene[asset_cfg.name]
+    ids = asset_cfg.joint_ids
+    q = asset.data.joint_pos[:, ids]
+    limits = asset.data.soft_joint_pos_limits[:, ids]
+    lo, hi = limits[..., 0], limits[..., 1]
+    mid = 0.5 * (lo + hi)
+    half = 0.5 * (hi - lo).clamp(min=1e-6)
+    # 0 at the centre, 1 at either limit.
+    frac = ((q - mid).abs() / half).clamp(0.0, 1.0)
+    over = ((frac - (1.0 - margin)) / margin).clamp(min=0.0)
+    return -torch.sum(torch.square(over), dim=1)
 
 
 def hop_energy_monitor(

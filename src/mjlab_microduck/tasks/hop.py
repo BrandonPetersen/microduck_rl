@@ -903,6 +903,33 @@ def make_hop_sim2real_variant(cfg, kp_range=(0.8, 1.8), kd_range=(0.8, 1.3),
     return cfg
 
 
+# Weight for the wide-band joint-limit penalty. Positive: the function is
+# self-negating (see the sign convention in mdp.py). Modest, because the
+# clamp in Patch 8 already makes an out-of-range target harmless -- this only
+# has to stop the policy PARKING against a stop, which it did at 86 of 90 deg
+# on the knee while the limits were still the pi/2 placeholder.
+LIMIT_PROXIMITY_WEIGHT = 0.5
+LIMIT_PROXIMITY_MARGIN = 0.25
+
+
+def add_joint_limit_penalty(cfg, weight=LIMIT_PROXIMITY_WEIGHT,
+                            margin=LIMIT_PROXIMITY_MARGIN):
+    """Penalise the last `margin` of travel on the SERVO joints.
+
+    Scoped to `^(?!passive_).*` so the foot springs, which live at one end of
+    their travel by design, are not charged for it.
+    """
+    cfg.rewards["joint_limit_proximity"] = RewardTermCfg(
+        func=microduck_mdp.joint_limit_proximity,
+        weight=weight,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=[r"^(?!passive_).*"]),
+            "margin": margin,
+        },
+    )
+    return cfg
+
+
 def make_free_hop_variant(cfg):
     """Pay per hop, not per step in a phase window -- let the rate emerge.
 
@@ -951,6 +978,7 @@ def make_free_hop_variant(cfg):
         term = cfg.rewards.get(name)
         if term is not None:
             term.params["gate"] = "enable"
+    add_joint_limit_penalty(cfg)
     vel = cfg.rewards.get("hop_upward_velocity")
     if vel is not None:
         vel.params["height_source"] = "com"
