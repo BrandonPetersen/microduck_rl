@@ -155,6 +155,34 @@ def txrx(ser, dxl_id: int, pkt: bytes, expect: int, timeout: float = 0.15, tries
     return None, None
 
 
+def _watch(ser, ids, names):
+    import signal
+    lo = {i: 9e9 for i in ids}
+    hi = {i: -9e9 for i in ids}
+    stop = {"now": False}
+    signal.signal(signal.SIGINT, lambda *_: stop.__setitem__("now", True))
+    print("Torque must be OFF (robotctl robot relax). Move each joint slowly to BOTH stops.")
+    print("Ctrl-C when done.\n")
+    while not stop["now"]:
+        line = []
+        for i in ids:
+            _, pp = txrx(ser, i, packet(i, INST_READ, struct.pack("<HH", 132, 4)), 4, timeout=0.08, tries=2)
+            if not pp or len(pp) != 4:
+                continue
+            deg = (struct.unpack("<i", pp)[0] - 2048) * 360.0 / 4096.0
+            lo[i] = min(lo[i], deg)
+            hi[i] = max(hi[i], deg)
+            line.append(f"{names.get(i, i)} {deg:+7.1f} [{lo[i]:+7.1f},{hi[i]:+7.1f}]")
+        print("  " + " | ".join(line) + "        ", end="\r", flush=True)
+        time.sleep(0.05)
+    print("\n\nmeasured travel:")
+    for i in ids:
+        if lo[i] < 9e8:
+            print(f"  {names.get(i, i):16s} [{lo[i]:+7.1f}, {hi[i]:+7.1f}] deg   "
+                  f"= [{lo[i]*3.14159/180:+.4f}, {hi[i]*3.14159/180:+.4f}] rad")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default="/dev/ttyS2")
@@ -162,6 +190,16 @@ def main() -> int:
     ap.add_argument("--ids", default="10-14,20-24,30-34",
                     help="the real map, from duck-control model.rs JOINT_IDS: "
                          "right leg 10-14, left leg 20-24, neck/head/mouth 30-34")
+    ap.add_argument("--limits", action="store_true",
+                    help="also read Min/Max Position Limit and Present Position. The XL330 "
+                         "refuses a goal outside its position limits and will sit against a "
+                         "mechanical stop drawing current, which is how an ankle overloads.")
+    ap.add_argument("--watch", metavar="NAMES", default=None,
+                    help="live min/max of these joints (comma-separated names or ids) with "
+                         "torque OFF, so you can move each one to its mechanical stops and "
+                         "read the real travel. The MJCF gives hip_pitch, knee and ankle an "
+                         "exported placeholder of exactly +/-90 deg; measuring them is the "
+                         "point of this mode.")
     ap.add_argument("--reboot", action="store_true",
                     help="send REBOOT to every id whose error register is non-zero. "
                          "This CLEARS the latch; it does not fix a real fault.")
@@ -175,6 +213,12 @@ def main() -> int:
         else:
             ids.append(int(part))
     ser = _Port(a.port, a.baud)
+    if a.watch:
+        by_name = {v: k for k, v in NAMES.items()}
+        want = [by_name.get(w.strip(), None) or (int(w) if w.strip().isdigit() else None)
+                for w in a.watch.split(",")]
+        want = [w for w in want if w is not None]
+        return _watch(ser, want, NAMES)
     faulted, seen, fault_bits = [], 0, {}
     for i in ids:
         err, payload = txrx(ser, i, packet(i, INST_READ, struct.pack("<HH", ADDR_HW_ERROR, 1)), 1)
@@ -188,9 +232,21 @@ def main() -> int:
         temp = t[0] if t else -1
         flag = "" if hw == 0 else "  <-- " + ", ".join(
             name for bit, name in BITS.items() if hw & (1 << bit)) or f"  <-- unknown bits 0x{hw:02x}"
+        extra = ""
+        if a.limits:
+            _, mx = txrx(ser, i, packet(i, INST_READ, struct.pack("<HH", 48, 4)), 4)
+            _, mn = txrx(ser, i, packet(i, INST_READ, struct.pack("<HH", 52, 4)), 4)
+            _, pp = txrx(ser, i, packet(i, INST_READ, struct.pack("<HH", 132, 4)), 4)
+            def deg(b, signed=False):
+                if not b or len(b) != 4:
+                    return float("nan")
+                v = struct.unpack("<i" if signed else "<I", b)[0]
+                return (v - 2048) * 360.0 / 4096.0      # 0.088 deg/tick, 2048 = centre
+            extra = (f"  limits [{deg(mn):+7.1f},{deg(mx):+7.1f}] deg"
+                     f"  at {deg(pp, True):+7.1f}")
         latched = "  TORQUE LATCHED OFF" if hw & LATCHING else ""
         print(f"  id {i:3d} {NAMES.get(i, '?'):16s} hw_error=0x{hw:02x}  "
-              f"{volts:5.1f} V  {temp:3d} C{flag}{latched}")
+              f"{volts:5.1f} V  {temp:3d} C{extra}{flag if not a.limits else ''}{latched}")
         if hw:
             faulted.append(i)
             fault_bits[i] = hw
