@@ -39,6 +39,20 @@ LATCHING = 52
 # The joints whose MJCF range is exactly +/-pi/2 on both sides -- an
 # onshape-to-robot export default rather than a measured limit. These are what
 # `--watch` measures by default, because they are the ones the model invented.
+# duck-control model.rs DEFAULT_POSITION, in degrees. bus.rs maps raw ticks
+# straight to joint angle -- (2*pi*raw/4096) - pi, no per-joint sign or offset
+# -- so a measured sweep is directly comparable to these. Every joint MUST be
+# able to reach its home angle, which makes this the sanity check on a sweep.
+HOME_DEG = {
+    20: 0.0, 21: -5.0, 22: -26.2, 23: -0.3, 24: +26.0,
+    30: +20.0, 31: +20.0, 32: 0.0, 33: 0.0, 34: 0.0,
+    10: 0.0, 11: +5.0, 12: +26.2, 13: +0.3, 14: -26.0,
+}
+# Mirrored pairs: the legs are equal and opposite in this convention, so a
+# left span [a, b] predicts a right span [-b, -a]. Disagreement means one of
+# the two was not swept fully.
+MIRROR = {20: 10, 21: 11, 22: 12, 23: 13, 24: 14,
+          10: 20, 11: 21, 12: 22, 13: 23, 14: 24}
 PLACEHOLDER_JOINTS = "left_ankle,right_ankle,left_knee,right_knee,left_hip_pitch,right_hip_pitch"
 SHORT = {"left_ankle": "l_ank", "right_ankle": "r_ank", "left_knee": "l_kne",
          "right_knee": "r_kne", "left_hip_pitch": "l_hip", "right_hip_pitch": "r_hip"}
@@ -87,7 +101,20 @@ class _Port:
         self.termios.tcflush(self.fd, self.termios.TCIFLUSH)
 
     def write(self, data: bytes) -> None:
-        self.os.write(self.fd, data)
+        # O_NONBLOCK means a full kernel tx buffer raises EAGAIN rather than
+        # waiting. At 1 Mbps with six joints polled in a loop that happens
+        # readily, and an unhandled EAGAIN killed a live measurement mid-run.
+        import select
+        view = memoryview(data)
+        deadline = time.time() + 0.2
+        while view:
+            try:
+                n = self.os.write(self.fd, view)
+                view = view[n:]
+            except BlockingIOError:
+                if time.time() > deadline:
+                    raise
+                select.select([], [self.fd], [], 0.01)
 
     def flush(self) -> None:
         self.termios.tcdrain(self.fd)
@@ -143,6 +170,12 @@ def _status_frames(buf: bytes):
 
 
 def txrx(ser, dxl_id: int, pkt: bytes, expect: int, timeout: float = 0.15, tries: int = 3):
+    """NO ECHO DRAIN. This board's transceiver handles direction, so our own
+    packet does NOT come back -- draining len(pkt) bytes ate the reply instead
+    and every register read came back as zero. Validated the other way: without
+    the drain, temperatures and voltages match `robotctl health` exactly.
+    _status_frames rejects anything that is not a CRC-valid status packet from
+    the id we asked, which is what makes that safe."""
     for _ in range(tries):
         ser.reset_input_buffer()
         ser.write(pkt)
@@ -172,21 +205,48 @@ def _watch(ser, ids, names):
     while not stop["now"]:
         line = []
         for i in ids:
-            _, pp = txrx(ser, i, packet(i, INST_READ, struct.pack("<HH", 132, 4)), 4, timeout=0.08, tries=2)
+            _, pp = txrx(ser, i, packet(i, INST_READ, struct.pack("<HH", 132, 4)), 4, timeout=0.1, tries=2)
             if not pp or len(pp) != 4:
                 continue
-            deg = (struct.unpack("<i", pp)[0] - 2048) * 360.0 / 4096.0
+            raw = struct.unpack("<i", pp)[0]
+            if raw == 0:
+                continue          # a desynced read, not a real -180 deg
+            deg = (raw - 2048) * 360.0 / 4096.0
             lo[i] = min(lo[i], deg)
             hi[i] = max(hi[i], deg)
             nm = names.get(i, str(i))
             line.append(f"{SHORT.get(nm, nm)}{deg:+6.1f}[{lo[i]:+6.1f},{hi[i]:+6.1f}]")
         print(" " + " ".join(line) + "   ", end="\r", flush=True)
-        time.sleep(0.05)
+        # 5 Hz. A tight poll desyncs the bus and starts returning zeros, and
+        # nobody moves a joint to its stop faster than this anyway.
+        time.sleep(0.2)
     print("\n\nmeasured travel:")
+    bad = []
     for i in ids:
-        if lo[i] < 9e8:
-            print(f"  {names.get(i, i):16s} [{lo[i]:+7.1f}, {hi[i]:+7.1f}] deg   "
-                  f"= [{lo[i]*3.14159/180:+.4f}, {hi[i]*3.14159/180:+.4f}] rad")
+        if lo[i] > 9e8:
+            continue
+        home = HOME_DEG.get(i)
+        note = ""
+        if home is not None and not (lo[i] - 2 <= home <= hi[i] + 2):
+            note = f"   <-- INCOMPLETE: never reached home ({home:+.1f})"
+            bad.append(names.get(i, i))
+        print(f"  {names.get(i, i):16s} [{lo[i]:+7.1f}, {hi[i]:+7.1f}] deg   "
+              f"= [{lo[i] * 3.14159 / 180:+.4f}, {hi[i] * 3.14159 / 180:+.4f}] rad{note}")
+    # Mirror cross-check: left [a,b] should predict right [-b,-a].
+    done = set()
+    for i in ids:
+        j = MIRROR.get(i)
+        if j is None or j not in ids or lo[i] > 9e8 or lo[j] > 9e8 or (j, i) in done:
+            continue
+        done.add((i, j))
+        pred_lo, pred_hi = -hi[i], -lo[i]
+        err = max(abs(pred_lo - lo[j]), abs(pred_hi - hi[j]))
+        verdict = "consistent" if err < 8 else f"DISAGREE by {err:.0f} deg -- one side under-swept"
+        print(f"  mirror {names.get(i, i)} vs {names.get(j, j)}: "
+              f"predicts [{pred_lo:+7.1f},{pred_hi:+7.1f}] measured "
+              f"[{lo[j]:+7.1f},{hi[j]:+7.1f}]  {verdict}")
+    if bad:
+        print(f"\n  re-sweep: {', '.join(map(str, bad))}")
     return 0
 
 
